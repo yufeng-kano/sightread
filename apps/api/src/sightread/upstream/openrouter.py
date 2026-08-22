@@ -1,5 +1,6 @@
-"""OpenRouter client — the only module that talks to OpenRouter and the only one that
-ever holds a decrypted user key (docs/project-structure.md).
+"""Upstream vision client — the only module that talks to a vision upstream (OpenRouter
+or a user-defined OpenAI-compatible connection) and the only one that ever holds a
+decrypted user key (docs/project-structure.md).
 
 Key material is never logged and never appears in raised messages.
 """
@@ -7,24 +8,31 @@ Key material is never logged and never appears in raised messages.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import re
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth.crypto import decrypt_openrouter_key
-from ..db.models import OpenRouterKey
+from ..auth.crypto import decrypt_connection_key, decrypt_openrouter_key
+from ..db.models import OpenRouterKey, ProviderConnection
 from ..errors import ApiError
 
 BASE_URL = "https://openrouter.ai/api/v1"
 MODELS_URL = f"{BASE_URL}/models"
 KEY_URL = f"{BASE_URL}/key"
 CHAT_URL = f"{BASE_URL}/chat/completions"
+
+# The two upstream wire flavours (docs/api.md § Upstreams). Both speak OpenAI Chat
+# Completions; only OpenRouter takes its `usage: {include}` extension field.
+KIND_OPENROUTER = "openrouter"
+KIND_OPENAI = "openai"
 
 MODELS_CACHE_TTL_SECONDS = 3600
 REQUEST_TIMEOUT_SECONDS = 20.0
@@ -90,11 +98,84 @@ async def fetch_image_models(now: float | None = None) -> list[dict]:
     return models
 
 
+# --- provider connections (user-defined OpenAI-compatible endpoints) ------------------
+
+
+def normalize_base_url(raw: str, app_env: str) -> str:
+    """Validate and canonicalize a connection's base URL (docs/auth.md § 3).
+
+    The app fetches this URL server-side, so outside local it must be https and must not
+    point at loopback/link-local/private literals — a hosted deployment must not be usable
+    as a probe into its own network.
+    """
+    candidate = raw.strip().rstrip("/")
+    parts = urlsplit(candidate)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ApiError(400, "invalid_request", "base_url must be an http(s) URL")
+    if parts.query or parts.fragment:
+        raise ApiError(400, "invalid_request", "base_url must not carry a query or fragment")
+    if app_env != "local":
+        if parts.scheme != "https":
+            raise ApiError(400, "invalid_request", "base_url must use https")
+        host = parts.hostname
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if (
+            host == "localhost"
+            or host.endswith(".localhost")
+            or (
+                address is not None
+                and (address.is_loopback or address.is_private or address.is_link_local)
+            )
+        ):
+            raise ApiError(400, "invalid_request", "base_url must be a public endpoint")
+    return candidate
+
+
+async def stored_connection_models(base_url: str, secret_key: str, ciphertext: bytes) -> list[dict]:
+    """`fetch_connection_models` for a stored key — decryption stays inside this module."""
+    return await fetch_connection_models(base_url, decrypt_connection_key(secret_key, ciphertext))
+
+
+async def fetch_connection_models(base_url: str, api_key: str) -> list[dict]:
+    """The model catalog of an OpenAI-compatible endpoint — also the save-time key check.
+
+    `GET {base_url}/models` is free on every OpenAI-format server we care about, so it
+    doubles as validation without spending the user's money (docs/auth.md § 3).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
+            )
+    except httpx.HTTPError as exc:
+        raise ApiError(502, "upstream", "Could not reach the connection's endpoint") from exc
+    if response.status_code in (401, 403):
+        raise ApiError(400, "invalid_request", "The endpoint rejected this API key")
+    if response.status_code >= 400:
+        raise ApiError(
+            502, "upstream", f"The endpoint returned {response.status_code} for /models"
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ApiError(502, "upstream", "The endpoint returned a non-JSON model list") from exc
+
+    models = []
+    for entry in payload.get("data") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str):
+            name = entry.get("name")
+            models.append({"id": entry["id"], "name": name if isinstance(name, str) else None})
+    return models
+
+
 # --- vision calls ---------------------------------------------------------------------
 
 
 class UpstreamError(Exception):
-    """An OpenRouter call failed. `fatal` marks a failure that will repeat for every page,
+    """An upstream call failed. `fatal` marks a failure that will repeat for every page,
     so the caller should abort the whole job instead of burning pages on it."""
 
     def __init__(self, message: str, *, fatal: bool = False) -> None:
@@ -106,7 +187,7 @@ class RateLimited(UpstreamError):
     """429. The caller backs off and reduces that job's concurrency (docs/parsing.md)."""
 
     def __init__(self, retry_after: float | None = None) -> None:
-        super().__init__("OpenRouter rate-limited this key")
+        super().__init__("The upstream rate-limited this key")
         self.retry_after = retry_after
 
 
@@ -114,22 +195,29 @@ class PaymentRequired(UpstreamError):
     """402. The page fails with reason `payment`; a repeat means the key is dead."""
 
     def __init__(self) -> None:
-        super().__init__("OpenRouter reported exhausted credits")
+        super().__init__("The upstream reported exhausted credits")
 
 
 @dataclass(frozen=True)
-class UserKey:
-    """A user's OpenRouter key, still encrypted. Only this module ever opens it, and the
-    plaintext never leaves the request it authorises (docs/project-structure.md)."""
+class Connection:
+    """A resolved upstream: where to call, and the still-encrypted key to call it with.
+
+    Only this module ever opens the ciphertext, and the plaintext never leaves the request
+    it authorises (docs/project-structure.md). The default field values are the built-in
+    OpenRouter upstream; a provider connection carries its own base URL and kind.
+    """
 
     ciphertext: bytes
     secret_key: str
+    base_url: str = BASE_URL
+    kind: str = KIND_OPENROUTER
 
     def __repr__(self) -> str:  # never let key material reach a log line
-        return "UserKey(...)"
+        return "Connection(...)"
 
     def authorization(self) -> str:
-        return f"Bearer {decrypt_openrouter_key(self.secret_key, self.ciphertext)}"
+        decrypt = decrypt_openrouter_key if self.kind == KIND_OPENROUTER else decrypt_connection_key
+        return f"Bearer {decrypt(self.secret_key, self.ciphertext)}"
 
 
 @dataclass(frozen=True)
@@ -145,11 +233,33 @@ class PageTranscription:
     usage: Usage
 
 
-async def load_user_key(db: AsyncSession, secret_key: str, user_id: int) -> UserKey | None:
-    row = (
-        await db.execute(select(OpenRouterKey).where(OpenRouterKey.user_id == user_id))
+async def load_connection(
+    db: AsyncSession, secret_key: str, user_id: int, connection_id: int | None
+) -> Connection | None:
+    """The upstream a job calls: OpenRouter when `connection_id` is NULL, else that
+    provider connection (docs/api.md § Upstreams). None when the credential is gone."""
+    if connection_id is None:
+        row = (
+            await db.execute(select(OpenRouterKey).where(OpenRouterKey.user_id == user_id))
+        ).scalar_one_or_none()
+        return (
+            None if row is None else Connection(ciphertext=row.ciphertext, secret_key=secret_key)
+        )
+    connection = (
+        await db.execute(
+            select(ProviderConnection).where(
+                ProviderConnection.id == connection_id, ProviderConnection.user_id == user_id
+            )
+        )
     ).scalar_one_or_none()
-    return None if row is None else UserKey(ciphertext=row.ciphertext, secret_key=secret_key)
+    if connection is None:
+        return None
+    return Connection(
+        ciphertext=connection.ciphertext,
+        secret_key=secret_key,
+        base_url=connection.base_url,
+        kind=KIND_OPENAI,
+    )
 
 
 def image_data_url(path: Path) -> str:
@@ -182,18 +292,18 @@ def _usage(payload: dict) -> Usage:
 def _message_text(payload: dict) -> str:
     choices = payload.get("choices") or []
     if not choices:
-        raise UpstreamError("OpenRouter returned no completion")
+        raise UpstreamError("The upstream returned no completion")
     content = (choices[0].get("message") or {}).get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         # Some providers answer with content parts instead of a plain string.
         return "".join(part.get("text", "") for part in content if isinstance(part, dict))
-    raise UpstreamError("OpenRouter returned an unreadable completion")
+    raise UpstreamError("The upstream returned an unreadable completion")
 
 
 def _raise_for_error_payload(payload: dict) -> None:
-    """OpenRouter can report a provider failure inside a 200 response."""
+    """OpenRouter-style servers can report a provider failure inside a 200 response."""
     error = payload.get("error")
     if not isinstance(error, dict):
         return
@@ -202,11 +312,13 @@ def _raise_for_error_payload(payload: dict) -> None:
         raise PaymentRequired()
     if code == 429:
         raise RateLimited()
-    raise UpstreamError(f"OpenRouter reported an upstream error ({code or 'unknown'})")
+    raise UpstreamError(f"The upstream reported an error ({code or 'unknown'})")
 
 
-async def _chat_with_image(key: UserKey, model: str, prompt: str, image: Path) -> tuple[str, Usage]:
-    body = {
+async def _chat_with_image(
+    connection: Connection, model: str, prompt: str, image: Path
+) -> tuple[str, Usage]:
+    body: dict = {
         "model": model,
         "messages": [
             {
@@ -217,16 +329,20 @@ async def _chat_with_image(key: UserKey, model: str, prompt: str, image: Path) -
                 ],
             }
         ],
-        # Ask for token counts and the actual cost; never price locally (docs/parsing.md).
-        "usage": {"include": True},
     }
+    if connection.kind == KIND_OPENROUTER:
+        # Ask for token counts and the actual cost; never price locally (docs/parsing.md).
+        # OpenRouter-only: a generic OpenAI server would reject the unknown field.
+        body["usage"] = {"include": True}
     try:
         async with httpx.AsyncClient(timeout=CHAT_TIMEOUT_SECONDS) as client:
             response = await client.post(
-                CHAT_URL, headers={"Authorization": key.authorization()}, json=body
+                f"{connection.base_url}/chat/completions",
+                headers={"Authorization": connection.authorization()},
+                json=body,
             )
     except httpx.HTTPError as exc:
-        raise UpstreamError("OpenRouter was unreachable") from exc
+        raise UpstreamError("The upstream was unreachable") from exc
 
     if response.status_code == 429:
         retry_after = response.headers.get("retry-after")
@@ -234,20 +350,20 @@ async def _chat_with_image(key: UserKey, model: str, prompt: str, image: Path) -
     if response.status_code == 402:
         raise PaymentRequired()
     if response.status_code in (401, 403):
-        raise UpstreamError("OpenRouter rejected the stored key", fatal=True)
+        raise UpstreamError("The upstream rejected the stored key", fatal=True)
     if response.status_code >= 400:
-        raise UpstreamError(f"OpenRouter returned {response.status_code}")
+        raise UpstreamError(f"The upstream returned {response.status_code}")
 
     try:
         payload = response.json()
     except ValueError as exc:
-        raise UpstreamError("OpenRouter returned a non-JSON body") from exc
+        raise UpstreamError("The upstream returned a non-JSON body") from exc
     _raise_for_error_payload(payload)
     return _message_text(payload), _usage(payload)
 
 
 async def transcribe_page(
-    key: UserKey,
+    connection: Connection,
     model: str,
     prompt_template: str,
     bbox_format: str,
@@ -260,5 +376,5 @@ async def transcribe_page(
     with stray braces must never break the call (docs/parsing.md § Prompts).
     """
     prompt = prompt_template.replace("{page}", str(page_no)).replace("{bbox_format}", bbox_format)
-    text, usage = await _chat_with_image(key, model, prompt, image)
+    text, usage = await _chat_with_image(connection, model, prompt, image)
     return PageTranscription(markdown=_CODE_FENCE_RE.sub("", text.strip()), usage=usage)

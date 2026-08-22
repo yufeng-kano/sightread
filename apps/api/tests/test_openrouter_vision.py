@@ -1,4 +1,4 @@
-"""Vision calls against a stubbed OpenRouter. No test ever reaches the network.
+"""Vision calls against a stubbed upstream. No test ever reaches the network.
 
 The stubs assert on the request we send (image data URL, usage flag) and on how defensively
 we read what comes back (docs/testing.md § Cost safety).
@@ -13,13 +13,14 @@ import httpx
 import pytest
 import respx
 
-from sightread.auth.crypto import encrypt_openrouter_key
+from sightread.auth.crypto import encrypt_connection_key, encrypt_openrouter_key
 from sightread.upstream.openrouter import (
     CHAT_URL,
+    KIND_OPENAI,
+    Connection,
     PaymentRequired,
     RateLimited,
     UpstreamError,
-    UserKey,
     transcribe_page,
 )
 
@@ -28,8 +29,8 @@ PROMPT = "Transcribe page {page} in {bbox_format}."
 
 
 @pytest.fixture
-def key() -> UserKey:
-    return UserKey(ciphertext=encrypt_openrouter_key(SECRET, "sk-or-v1-test"), secret_key=SECRET)
+def key() -> Connection:
+    return Connection(ciphertext=encrypt_openrouter_key(SECRET, "sk-or-v1-test"), secret_key=SECRET)
 
 
 def completion(content: str, cost: str = "0.000420") -> dict:
@@ -128,5 +129,39 @@ async def test_provider_error_inside_a_200(key, documents) -> None:
 
 
 def test_user_key_never_reveals_itself_in_a_repr(key) -> None:
-    assert repr(key) == "UserKey(...)"
+    assert repr(key) == "Connection(...)"
     assert "sk-or" not in repr(key)
+
+
+@respx.mock
+async def test_an_openai_connection_calls_its_own_endpoint_without_the_usage_flag(
+    documents,
+) -> None:
+    """A custom connection posts to `{base_url}/chat/completions` and never sends the
+    OpenRouter-only `usage` extension field (docs/parsing.md § Upstream usage)."""
+    connection = Connection(
+        ciphertext=encrypt_connection_key(SECRET, "sk-kano-proxy-test"),
+        secret_key=SECRET,
+        base_url="https://proxy.example/openai/v1",
+        kind=KIND_OPENAI,
+    )
+    route = respx.post("https://proxy.example/openai/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "# Page"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+    )
+
+    result = await transcribe_page(
+        connection, "gpt-vision", PROMPT, "yxyx_norm1000", documents["png"], 2
+    )
+
+    assert result.markdown == "# Page"
+    assert result.usage.prompt_tokens == 10
+    assert result.usage.cost == Decimal("0")
+    sent = json.loads(route.calls[0].request.content)
+    assert "usage" not in sent
+    assert route.calls[0].request.headers["authorization"] == "Bearer sk-kano-proxy-test"

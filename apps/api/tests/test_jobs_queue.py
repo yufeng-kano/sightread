@@ -39,6 +39,7 @@ JOB_DEFAULTS = {
     "size_bytes": 2048,
     "pages_spec": "",
     "model": "vendor/model",
+    "connection_id": None,
     "profile": None,
     "profile_version": 0,
     "bbox_format": "yxyx_norm1000",
@@ -79,6 +80,7 @@ async def test_dedup_lookup_matches_the_full_key(sessionmaker) -> None:
             "user_id": user.id,
             "sha256": "a" * 64,
             "model": "vendor/model",
+            "connection_id": None,
             "profile": None,
             "profile_version": 0,
             "pages_spec": "",
@@ -90,6 +92,8 @@ async def test_dedup_lookup_matches_the_full_key(sessionmaker) -> None:
         assert await find_cached_job(db, **{**key, "pages_spec": "1-2"}) is None
         assert await find_cached_job(db, **{**key, "profile": "gemini-yxyx"}) is None
         assert await find_cached_job(db, **{**key, "prompt_sha256": "q" * 64}) is None
+        # A different upstream is a different parse, even for the same model id.
+        assert await find_cached_job(db, **{**key, "connection_id": 12345}) is None
 
         other = await _user(db, "second@example.com")
         # Never across users, even for identical bytes (docs/jobs.md § Dedup).
@@ -110,6 +114,7 @@ async def test_dedup_ignores_unfinished_jobs(sessionmaker) -> None:
                 user_id=user.id,
                 sha256="c" * 64,
                 model="vendor/model",
+                connection_id=None,
                 profile=None,
                 profile_version=0,
                 pages_spec="",

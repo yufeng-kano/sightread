@@ -14,17 +14,33 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
+from sqlalchemy import update as sa_update
 
 from ..auth.api_keys import create_api_key
-from ..auth.crypto import encrypt_openrouter_key, mask_openrouter_key
+from ..auth.crypto import encrypt_connection_key, encrypt_openrouter_key, mask_openrouter_key
 from ..auth.deps import AppSettings, CsrfGuard, DbSession, SessionUser
 from ..auth.oidc import DEV_USER_EMAIL, DEV_USER_SUB, POST_LOGIN_KEY, upsert_user
 from ..auth.sessions import SESSION_COOKIE, SESSION_TTL, create_session, delete_session
-from ..db.models import ApiKey, Job, OpenRouterKey, Result, UsageLog, UserSettings, utcnow
+from ..db.models import (
+    ApiKey,
+    Job,
+    OpenRouterKey,
+    PromptPreset,
+    ProviderConnection,
+    Result,
+    UsageLog,
+    UserSettings,
+    utcnow,
+)
 from ..errors import ApiError
 from ..jobs.runner import result_payload
 from ..parsing.profiles import DEFAULT_PROMPT_TEMPLATE, get_profile
-from ..upstream.openrouter import validate_api_key
+from ..upstream.openrouter import (
+    fetch_connection_models,
+    normalize_base_url,
+    stored_connection_models,
+    validate_api_key,
+)
 
 router = APIRouter(prefix="/api", tags=["control"])
 
@@ -128,7 +144,8 @@ async def me(user: SessionUser, db: DbSession):
         "settings": {
             "default_model": settings_row.default_model if settings_row else None,
             "default_profile": settings_row.default_profile if settings_row else None,
-            "system_prompt": settings_row.system_prompt if settings_row else None,
+            "default_connection_id": settings_row.default_connection_id if settings_row else None,
+            "prompt_preset_id": settings_row.prompt_preset_id if settings_row else None,
         },
         # The shipped prompt, so the settings page can show what "default" means.
         "defaults": {"system_prompt": DEFAULT_PROMPT_TEMPLATE},
@@ -250,6 +267,297 @@ async def delete_openrouter_key(user: SessionUser, db: DbSession) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+# --- provider connections -------------------------------------------------------------
+
+
+class ConnectionCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    base_url: str = Field(min_length=1, max_length=1024)
+    api_key: str = Field(min_length=8, max_length=512)
+
+
+class ConnectionUpdate(BaseModel):
+    """Partial update; changing the endpoint or the key re-validates against it."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    base_url: str | None = Field(default=None, min_length=1, max_length=1024)
+    api_key: str | None = Field(default=None, min_length=8, max_length=512)
+
+
+def _connection_payload(row: ProviderConnection) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "base_url": row.base_url,
+        "masked": row.masked,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+async def _owned_connection(db: DbSession, user_id: int, connection_id: int) -> ProviderConnection:
+    row = (
+        await db.execute(
+            select(ProviderConnection).where(
+                ProviderConnection.id == connection_id, ProviderConnection.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ApiError(404, "invalid_request", "No such connection")
+    return row
+
+
+async def _refuse_duplicate_connection_name(
+    db: DbSession, user_id: int, name: str, exclude_id: int | None = None
+) -> None:
+    query = select(ProviderConnection.id).where(
+        ProviderConnection.user_id == user_id, ProviderConnection.name == name
+    )
+    if exclude_id is not None:
+        query = query.where(ProviderConnection.id != exclude_id)
+    if (await db.execute(query)).first() is not None:
+        raise ApiError(400, "invalid_request", "A connection with this name already exists")
+
+
+@router.get("/connections")
+async def list_connections(user: SessionUser, db: DbSession):
+    rows = (
+        (
+            await db.execute(
+                select(ProviderConnection)
+                .where(ProviderConnection.user_id == user.id)
+                .order_by(ProviderConnection.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {"connections": [_connection_payload(row) for row in rows]}
+
+
+@router.post("/connections", dependencies=[CsrfGuard], status_code=status.HTTP_201_CREATED)
+async def create_connection(
+    body: ConnectionCreate, user: SessionUser, db: DbSession, settings: AppSettings
+):
+    name = body.name.strip()
+    if not name:
+        raise ApiError(400, "invalid_request", "The connection needs a name")
+    base_url = normalize_base_url(body.base_url, settings.app_env)
+    candidate = body.api_key.strip()
+    await _refuse_duplicate_connection_name(db, user.id, name)
+    # `GET {base_url}/models` doubles as the save-time key check (docs/auth.md § 3).
+    await fetch_connection_models(base_url, candidate)
+
+    row = ProviderConnection(
+        user_id=user.id,
+        name=name,
+        base_url=base_url,
+        ciphertext=encrypt_connection_key(settings.secret_key, candidate),
+        masked=mask_openrouter_key(candidate),
+    )
+    db.add(row)
+    await db.commit()
+    return _connection_payload(row)
+
+
+@router.put("/connections/{connection_id}", dependencies=[CsrfGuard])
+async def update_connection(
+    connection_id: int,
+    body: ConnectionUpdate,
+    user: SessionUser,
+    db: DbSession,
+    settings: AppSettings,
+):
+    row = await _owned_connection(db, user.id, connection_id)
+    provided = body.model_fields_set
+
+    name = body.name.strip() if body.name else row.name
+    if not name:
+        raise ApiError(400, "invalid_request", "The connection needs a name")
+    if "name" in provided:
+        await _refuse_duplicate_connection_name(db, user.id, name, exclude_id=row.id)
+
+    base_url = (
+        normalize_base_url(body.base_url, settings.app_env)
+        if "base_url" in provided and body.base_url
+        else row.base_url
+    )
+    candidate = body.api_key.strip() if "api_key" in provided and body.api_key else None
+
+    if candidate is not None:
+        await fetch_connection_models(base_url, candidate)
+        row.ciphertext = encrypt_connection_key(settings.secret_key, candidate)
+        row.masked = mask_openrouter_key(candidate)
+    elif base_url != row.base_url:
+        # A moved endpoint must still accept the stored key before we point jobs at it.
+        await stored_connection_models(base_url, settings.secret_key, row.ciphertext)
+
+    row.name = name
+    row.base_url = base_url
+    row.updated_at = utcnow()
+    await db.commit()
+    return _connection_payload(row)
+
+
+@router.delete(
+    "/connections/{connection_id}",
+    dependencies=[CsrfGuard],
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_connection(
+    connection_id: int, user: SessionUser, db: DbSession
+) -> Response:
+    row = await _owned_connection(db, user.id, connection_id)
+    # Explicit fallback (not just the FK's SET NULL): a default model belongs to the
+    # deleted endpoint's catalog, so it goes too — back to "not set" on OpenRouter.
+    await db.execute(
+        sa_update(UserSettings)
+        .where(UserSettings.user_id == user.id, UserSettings.default_connection_id == row.id)
+        .values(default_connection_id=None, default_model=None)
+    )
+    await db.delete(row)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/connections/{connection_id}/models")
+async def connection_models(
+    connection_id: int, user: SessionUser, db: DbSession, settings: AppSettings
+):
+    """The connection's live model catalog, fetched with its stored key (docs/api.md)."""
+    row = await _owned_connection(db, user.id, connection_id)
+    models = await stored_connection_models(row.base_url, settings.secret_key, row.ciphertext)
+    return {"data": models}
+
+
+# --- prompt presets ---------------------------------------------------------------------
+
+
+class PromptCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    text: str = Field(min_length=1)
+
+
+class PromptUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    text: str | None = Field(default=None, min_length=1)
+
+
+def _prompt_payload(row: PromptPreset) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "text": row.text,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _checked_prompt_text(text: str, settings) -> str:
+    trimmed = text.strip()
+    if not trimmed:
+        raise ApiError(400, "invalid_request", "The prompt needs text")
+    if len(trimmed) > settings.system_prompt_max_chars:
+        raise ApiError(
+            400,
+            "invalid_request",
+            f"The prompt exceeds {settings.system_prompt_max_chars} characters",
+        )
+    return trimmed
+
+
+async def _owned_prompt(db: DbSession, user_id: int, prompt_id: int) -> PromptPreset:
+    row = (
+        await db.execute(
+            select(PromptPreset).where(
+                PromptPreset.id == prompt_id, PromptPreset.user_id == user_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise ApiError(404, "invalid_request", "No such prompt")
+    return row
+
+
+async def _refuse_duplicate_prompt_name(
+    db: DbSession, user_id: int, name: str, exclude_id: int | None = None
+) -> None:
+    query = select(PromptPreset.id).where(
+        PromptPreset.user_id == user_id, PromptPreset.name == name
+    )
+    if exclude_id is not None:
+        query = query.where(PromptPreset.id != exclude_id)
+    if (await db.execute(query)).first() is not None:
+        raise ApiError(400, "invalid_request", "A prompt with this name already exists")
+
+
+@router.get("/prompts")
+async def list_prompts(user: SessionUser, db: DbSession):
+    rows = (
+        (
+            await db.execute(
+                select(PromptPreset)
+                .where(PromptPreset.user_id == user.id)
+                .order_by(PromptPreset.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {"prompts": [_prompt_payload(row) for row in rows]}
+
+
+@router.post("/prompts", dependencies=[CsrfGuard], status_code=status.HTTP_201_CREATED)
+async def create_prompt(
+    body: PromptCreate, user: SessionUser, db: DbSession, settings: AppSettings
+):
+    name = body.name.strip()
+    if not name:
+        raise ApiError(400, "invalid_request", "The prompt needs a name")
+    text = _checked_prompt_text(body.text, settings)
+    await _refuse_duplicate_prompt_name(db, user.id, name)
+    row = PromptPreset(user_id=user.id, name=name, text=text)
+    db.add(row)
+    await db.commit()
+    return _prompt_payload(row)
+
+
+@router.put("/prompts/{prompt_id}", dependencies=[CsrfGuard])
+async def update_prompt(
+    prompt_id: int, body: PromptUpdate, user: SessionUser, db: DbSession, settings: AppSettings
+):
+    row = await _owned_prompt(db, user.id, prompt_id)
+    provided = body.model_fields_set
+    if "name" in provided and body.name:
+        name = body.name.strip()
+        if not name:
+            raise ApiError(400, "invalid_request", "The prompt needs a name")
+        await _refuse_duplicate_prompt_name(db, user.id, name, exclude_id=row.id)
+        row.name = name
+    if "text" in provided and body.text:
+        row.text = _checked_prompt_text(body.text, settings)
+    row.updated_at = utcnow()
+    await db.commit()
+    return _prompt_payload(row)
+
+
+@router.delete(
+    "/prompts/{prompt_id}", dependencies=[CsrfGuard], status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_prompt(prompt_id: int, user: SessionUser, db: DbSession) -> Response:
+    row = await _owned_prompt(db, user.id, prompt_id)
+    # Explicit fallback to the default prompt, not just the FK's SET NULL.
+    await db.execute(
+        sa_update(UserSettings)
+        .where(UserSettings.user_id == user.id, UserSettings.prompt_preset_id == row.id)
+        .values(prompt_preset_id=None)
+    )
+    await db.delete(row)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 # --- settings -------------------------------------------------------------------------
 
 
@@ -258,20 +566,18 @@ class SettingsPut(BaseModel):
 
     default_model: str | None = Field(default=None, max_length=255)
     default_profile: str | None = Field(default=None, max_length=64)
-    system_prompt: str | None = None
+    default_connection_id: int | None = None
+    prompt_preset_id: int | None = None
 
 
 @router.put("/settings", dependencies=[CsrfGuard])
-async def put_settings(body: SettingsPut, user: SessionUser, db: DbSession, settings: AppSettings):
+async def put_settings(body: SettingsPut, user: SessionUser, db: DbSession):
     if body.default_profile is not None and get_profile(body.default_profile) is None:
         raise ApiError(400, "invalid_request", f"Unknown profile '{body.default_profile}'")
-    prompt = body.system_prompt.strip() if body.system_prompt else None
-    if prompt and len(prompt) > settings.system_prompt_max_chars:
-        raise ApiError(
-            400,
-            "invalid_request",
-            f"The system prompt exceeds {settings.system_prompt_max_chars} characters",
-        )
+    if body.default_connection_id is not None:
+        await _owned_connection(db, user.id, body.default_connection_id)
+    if body.prompt_preset_id is not None:
+        await _owned_prompt(db, user.id, body.prompt_preset_id)
 
     row = (
         await db.execute(select(UserSettings).where(UserSettings.user_id == user.id))
@@ -284,13 +590,21 @@ async def put_settings(body: SettingsPut, user: SessionUser, db: DbSession, sett
     if "default_model" in provided or "default_profile" in provided:
         row.default_model = body.default_model
         row.default_profile = body.default_profile
-    if "system_prompt" in provided:
-        row.system_prompt = prompt
+    if "default_connection_id" in provided:
+        row.default_connection_id = body.default_connection_id
+    if "prompt_preset_id" in provided:
+        row.prompt_preset_id = body.prompt_preset_id
+    if row.default_connection_id is not None and row.default_profile is not None:
+        # Profiles resolve against the OpenRouter catalog only (docs/api.md).
+        raise ApiError(
+            400, "invalid_request", "Profiles run on OpenRouter only; clear one of the two"
+        )
     await db.commit()
     return {
         "default_model": row.default_model,
         "default_profile": row.default_profile,
-        "system_prompt": row.system_prompt,
+        "default_connection_id": row.default_connection_id,
+        "prompt_preset_id": row.prompt_preset_id,
     }
 
 

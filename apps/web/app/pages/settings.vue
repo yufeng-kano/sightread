@@ -1,10 +1,20 @@
 <script setup lang="ts">
 import {
+  createConnection,
+  createPrompt,
+  deleteConnection,
   deleteOpenRouterKey,
+  deletePrompt,
+  listConnectionModels,
+  listConnections,
   listModels,
   listProfiles,
+  listPrompts,
   putOpenRouterKey,
   putSettings,
+  updateConnection,
+  updatePrompt,
+  type ConnectionModel,
 } from '~/lib/api'
 import { formatDateTime } from '~/lib/format'
 import { modelLabel, sortModelsRecommendedFirst } from '~/lib/models'
@@ -25,12 +35,205 @@ const { data: catalog, errorMessage: catalogError } = useAuthedData(async () => 
 const recommendedModels = computed(() => catalog.value?.models.filter((model) => model.recommended) ?? [])
 const otherModels = computed(() => catalog.value?.models.filter((model) => !model.recommended) ?? [])
 
-const openrouterKey = computed(() => auth.me.value?.openrouter_key ?? null)
-const keyInput = ref('')
-const keyPending = ref(false)
-const keyError = ref<string | null>(null)
-const keyMessage = ref<string | null>(null)
-const confirmingDelete = ref(false)
+// --- providers: OpenRouter + the user's connections -------------------------
+
+const {
+  data: connectionsData,
+  errorMessage: connectionsError,
+  refresh: refreshConnections,
+} = useAuthedData(() => listConnections())
+const connections = computed(() => connectionsData.value?.connections ?? [])
+
+/** '' is the built-in OpenRouter; otherwise a connection id as the `<select>` string. */
+const providerChoice = ref('')
+const providerPending = ref(false)
+const providerError = ref<string | null>(null)
+const providerMessage = ref<string | null>(null)
+
+watch(
+  () => auth.me.value?.settings.default_connection_id,
+  (id) => {
+    providerChoice.value = id == null ? '' : String(id)
+  },
+  { immediate: true },
+)
+
+const selectedConnection = computed(
+  () => connections.value.find((row) => String(row.id) === providerChoice.value) ?? null,
+)
+
+/** Switching providers also clears the model/profile pair: it belonged to the old catalog. */
+async function applyProvider(value: string) {
+  const previous = providerChoice.value
+  providerChoice.value = value
+  providerPending.value = true
+  providerError.value = null
+  providerMessage.value = null
+  try {
+    await putSettings({
+      default_connection_id: value ? Number(value) : null,
+      default_model: null,
+      default_profile: null,
+    })
+    providerMessage.value = t('settings.providerSaved')
+    await auth.refresh()
+  } catch (error) {
+    providerChoice.value = previous
+    providerError.value = await resolve(error)
+  } finally {
+    providerPending.value = false
+  }
+}
+
+// --- connection add/edit dialog ---------------------------------------------
+
+const connectionModal = ref<null | { mode: 'create' } | { mode: 'edit'; id: number }>(null)
+const connName = ref('')
+const connUrl = ref('')
+const connKey = ref('')
+const connPending = ref(false)
+const connError = ref<string | null>(null)
+const confirmingConnectionDelete = ref(false)
+
+function openConnectionCreate() {
+  connName.value = ''
+  connUrl.value = ''
+  connKey.value = ''
+  connError.value = null
+  connectionModal.value = { mode: 'create' }
+}
+
+function openConnectionEdit() {
+  const row = selectedConnection.value
+  if (!row) {
+    return
+  }
+  connName.value = row.name
+  connUrl.value = row.base_url
+  connKey.value = ''
+  connError.value = null
+  connectionModal.value = { mode: 'edit', id: row.id }
+}
+
+async function submitConnection() {
+  const modal = connectionModal.value
+  if (!modal || connPending.value) {
+    return
+  }
+  connPending.value = true
+  connError.value = null
+  try {
+    if (modal.mode === 'create') {
+      const created = await createConnection({
+        name: connName.value.trim(),
+        base_url: connUrl.value.trim(),
+        api_key: connKey.value.trim(),
+      })
+      connectionModal.value = null
+      await refreshConnections()
+      // A freshly added provider is what the user came to use — select it right away.
+      await applyProvider(String(created.id))
+    } else {
+      await updateConnection(modal.id, {
+        name: connName.value.trim(),
+        base_url: connUrl.value.trim(),
+        ...(connKey.value.trim() ? { api_key: connKey.value.trim() } : {}),
+      })
+      connectionModal.value = null
+      await refreshConnections()
+      connectionModels.value = null
+      await loadConnectionModels()
+    }
+    providerMessage.value = t('settings.connectionSaved')
+  } catch (error) {
+    connError.value = await resolve(error)
+  } finally {
+    connPending.value = false
+  }
+}
+
+async function removeConnection() {
+  const row = selectedConnection.value
+  if (!row) {
+    return
+  }
+  connPending.value = true
+  providerError.value = null
+  try {
+    await deleteConnection(row.id)
+    confirmingConnectionDelete.value = false
+    await Promise.all([refreshConnections(), auth.refresh()])
+  } catch (error) {
+    providerError.value = await resolve(error)
+  } finally {
+    connPending.value = false
+  }
+}
+
+// --- model choice on a custom connection ------------------------------------
+
+const connectionModels = ref<ConnectionModel[] | null>(null)
+const connectionModelsPending = ref(false)
+const connectionModelsError = ref<string | null>(null)
+
+async function loadConnectionModels() {
+  const row = selectedConnection.value
+  if (!row) {
+    connectionModels.value = null
+    return
+  }
+  connectionModelsPending.value = true
+  connectionModelsError.value = null
+  try {
+    connectionModels.value = (await listConnectionModels(row.id)).data
+  } catch (error) {
+    connectionModelsError.value = await resolve(error)
+  } finally {
+    connectionModelsPending.value = false
+  }
+}
+
+watch(selectedConnection, (row, previous) => {
+  if (row?.id !== previous?.id) {
+    connectionModels.value = null
+    if (row) {
+      loadConnectionModels()
+    }
+  }
+})
+
+const connectionModelChoice = ref('')
+watch(
+  [() => auth.me.value?.settings.default_model, selectedConnection],
+  ([model, row]) => {
+    connectionModelChoice.value = row ? (model ?? '') : ''
+  },
+  { immediate: true },
+)
+
+const defaultsPending = ref(false)
+const defaultsError = ref<string | null>(null)
+const defaultsMessage = ref<string | null>(null)
+
+async function applyConnectionModel(value: string) {
+  const previous = connectionModelChoice.value
+  connectionModelChoice.value = value
+  defaultsPending.value = true
+  defaultsError.value = null
+  defaultsMessage.value = null
+  try {
+    await putSettings({ default_model: value || null, default_profile: null })
+    defaultsMessage.value = t('settings.saved')
+    await auth.refresh()
+  } catch (error) {
+    connectionModelChoice.value = previous
+    defaultsError.value = await resolve(error)
+  } finally {
+    defaultsPending.value = false
+  }
+}
+
+// --- model choice on OpenRouter (profiles + custom model) -------------------
 
 /**
  * One choice, not two: a parsing default is a model *and* the format it is prompted for,
@@ -40,9 +243,6 @@ const confirmingDelete = ref(false)
 const selection = ref('')
 /** The custom entry the dropdown shows — the stored default, or one just picked. */
 const customModel = ref<string | null>(null)
-const defaultsPending = ref(false)
-const defaultsError = ref<string | null>(null)
-const defaultsMessage = ref<string | null>(null)
 
 const addingCustom = ref(false)
 const customChoice = ref('')
@@ -50,6 +250,9 @@ const customChoice = ref('')
 watch(
   () => auth.me.value?.settings,
   (settings) => {
+    if (settings?.default_connection_id != null) {
+      return
+    }
     const profile = settings?.default_profile
     const model = settings?.default_model
     selection.value = profile ? `profile:${profile}` : model ? `model:${model}` : ''
@@ -67,6 +270,53 @@ const customOptionLabel = computed(() => {
   const entry = catalog.value?.models.find((model) => model.id === customModel.value)
   return entry ? modelLabel(entry) : customModel.value
 })
+
+/** Saves on selection, reverting the dropdown when the server refuses — a picker whose
+    display disagrees with the stored default would be lying. */
+async function applySelection(value: string) {
+  const previous = selection.value
+  selection.value = value
+  defaultsPending.value = true
+  defaultsError.value = null
+  defaultsMessage.value = null
+  try {
+    await putSettings({
+      default_model: value.startsWith('model:') ? value.slice('model:'.length) : null,
+      default_profile: value.startsWith('profile:') ? value.slice('profile:'.length) : null,
+    })
+    defaultsMessage.value = t('settings.saved')
+    await auth.refresh()
+  } catch (error) {
+    selection.value = previous
+    defaultsError.value = await resolve(error)
+  } finally {
+    defaultsPending.value = false
+  }
+}
+
+function openCustom() {
+  customChoice.value = customModel.value ?? ''
+  addingCustom.value = true
+}
+
+async function submitCustom() {
+  const choice = customChoice.value
+  if (!choice || defaultsPending.value) {
+    return
+  }
+  customModel.value = choice
+  addingCustom.value = false
+  await applySelection(`model:${choice}`)
+}
+
+// --- OpenRouter key ---------------------------------------------------------
+
+const openrouterKey = computed(() => auth.me.value?.openrouter_key ?? null)
+const keyInput = ref('')
+const keyPending = ref(false)
+const keyError = ref<string | null>(null)
+const keyMessage = ref<string | null>(null)
+const confirmingDelete = ref(false)
 
 async function saveOpenRouterKey() {
   const candidate = keyInput.value.trim()
@@ -103,84 +353,128 @@ async function removeOpenRouterKey() {
   }
 }
 
-/** Saves on selection, reverting the dropdown when the server refuses — a picker whose
-    display disagrees with the stored default would be lying. */
-async function applySelection(value: string) {
-  const previous = selection.value
-  selection.value = value
-  defaultsPending.value = true
-  defaultsError.value = null
-  defaultsMessage.value = null
-  try {
-    await putSettings({
-      default_model: value.startsWith('model:') ? value.slice('model:'.length) : null,
-      default_profile: value.startsWith('profile:') ? value.slice('profile:'.length) : null,
-    })
-    defaultsMessage.value = t('settings.saved')
-    await auth.refresh()
-  } catch (error) {
-    selection.value = previous
-    defaultsError.value = await resolve(error)
-  } finally {
-    defaultsPending.value = false
-  }
-}
+// --- prompt presets ---------------------------------------------------------
 
-function openCustom() {
-  customChoice.value = customModel.value ?? ''
-  addingCustom.value = true
-}
+const {
+  data: promptsData,
+  errorMessage: promptsError,
+  refresh: refreshPrompts,
+} = useAuthedData(() => listPrompts())
+const prompts = computed(() => promptsData.value?.prompts ?? [])
 
-/** The transcription prompt: the stored custom one, or the shipped default to start from. */
+/** What "default" means right now — shown as the starting point for a new prompt. */
 const defaultPrompt = computed(() => auth.me.value?.defaults.system_prompt ?? '')
-const storedPrompt = computed(() => auth.me.value?.settings.system_prompt ?? null)
-const promptInput = ref('')
+
+/** '' is the shipped default; otherwise a preset id as the `<select>` string. */
+const promptChoice = ref('')
 const promptPending = ref(false)
 const promptError = ref<string | null>(null)
 const promptMessage = ref<string | null>(null)
+const confirmingPromptDelete = ref(false)
 
 watch(
-  [storedPrompt, defaultPrompt],
-  () => {
-    promptInput.value = storedPrompt.value ?? defaultPrompt.value
+  () => auth.me.value?.settings.prompt_preset_id,
+  (id) => {
+    promptChoice.value = id == null ? '' : String(id)
   },
   { immediate: true },
 )
 
-async function savePrompt() {
-  if (promptPending.value) {
-    return
-  }
-  const trimmed = promptInput.value.trim()
-  // Saving the untouched default stores nothing, so future default improvements apply.
-  const wanted = trimmed && trimmed !== defaultPrompt.value.trim() ? trimmed : null
+const selectedPrompt = computed(
+  () => prompts.value.find((row) => String(row.id) === promptChoice.value) ?? null,
+)
+
+async function applyPromptChoice(value: string) {
+  const previous = promptChoice.value
+  promptChoice.value = value
   promptPending.value = true
   promptError.value = null
   promptMessage.value = null
   try {
-    await putSettings({ system_prompt: wanted })
-    promptMessage.value = t(wanted ? 'settings.promptSaved' : 'settings.promptDefaultRestored')
+    await putSettings({ prompt_preset_id: value ? Number(value) : null })
+    promptMessage.value = t('settings.promptSelected')
     await auth.refresh()
   } catch (error) {
+    promptChoice.value = previous
     promptError.value = await resolve(error)
   } finally {
     promptPending.value = false
   }
 }
 
-async function resetPrompt() {
-  promptInput.value = defaultPrompt.value
-  await savePrompt()
+const promptModal = ref<null | { mode: 'create' } | { mode: 'edit'; id: number }>(null)
+const promptName = ref('')
+const promptText = ref('')
+const promptModalPending = ref(false)
+const promptModalError = ref<string | null>(null)
+
+function openPromptCreate() {
+  promptName.value = ''
+  // The shipped default is the honest starting point for a custom prompt.
+  promptText.value = defaultPrompt.value
+  promptModalError.value = null
+  promptModal.value = { mode: 'create' }
 }
 
-async function submitCustom() {
-  const choice = customChoice.value
-  if (!choice || defaultsPending.value) {
+function openPromptEdit() {
+  const row = selectedPrompt.value
+  if (!row) {
     return
   }
-  customModel.value = choice
-  addingCustom.value = false
-  await applySelection(`model:${choice}`)
+  promptName.value = row.name
+  promptText.value = row.text
+  promptModalError.value = null
+  promptModal.value = { mode: 'edit', id: row.id }
+}
+
+async function submitPrompt() {
+  const modal = promptModal.value
+  if (!modal || promptModalPending.value) {
+    return
+  }
+  promptModalPending.value = true
+  promptModalError.value = null
+  try {
+    if (modal.mode === 'create') {
+      const created = await createPrompt({
+        name: promptName.value.trim(),
+        text: promptText.value.trim(),
+      })
+      promptModal.value = null
+      await refreshPrompts()
+      await applyPromptChoice(String(created.id))
+    } else {
+      await updatePrompt(modal.id, {
+        name: promptName.value.trim(),
+        text: promptText.value.trim(),
+      })
+      promptModal.value = null
+      await refreshPrompts()
+    }
+    promptMessage.value = t('settings.promptSaved')
+  } catch (error) {
+    promptModalError.value = await resolve(error)
+  } finally {
+    promptModalPending.value = false
+  }
+}
+
+async function removePrompt() {
+  const row = selectedPrompt.value
+  if (!row) {
+    return
+  }
+  promptPending.value = true
+  promptError.value = null
+  try {
+    await deletePrompt(row.id)
+    confirmingPromptDelete.value = false
+    await Promise.all([refreshPrompts(), auth.refresh()])
+  } catch (error) {
+    promptError.value = await resolve(error)
+  } finally {
+    promptPending.value = false
+  }
 }
 </script>
 
@@ -189,7 +483,62 @@ async function submitCustom() {
     <UiPageHeader :title="t('settings.headTitle')" />
 
     <div class="stack">
-      <UiCard :title="t('settings.openrouterTitle')">
+      <UiCard :title="t('settings.providerTitle')">
+        <div class="section">
+          <UiBanner v-if="connectionsError" tone="error">{{ connectionsError }}</UiBanner>
+
+          <div class="control-row">
+            <UiField v-slot="{ id }" class="grow" :label="t('settings.providerLabel')">
+              <UiSelect
+                :id="id"
+                :model-value="providerChoice"
+                :disabled="providerPending"
+                @update:model-value="applyProvider"
+              >
+                <option value="">{{ t('settings.providerOpenRouter') }}</option>
+                <option v-for="row in connections" :key="row.id" :value="String(row.id)">
+                  {{ row.name }}
+                </option>
+              </UiSelect>
+            </UiField>
+
+            <UiButton :disabled="providerPending" @click="openConnectionCreate">
+              <template #icon><UiIcon name="plus" /></template>
+              {{ t('settings.addProvider') }}
+            </UiButton>
+          </div>
+
+          <template v-if="selectedConnection">
+            <p class="state">
+              {{
+                t('settings.connectionState', {
+                  url: selectedConnection.base_url,
+                  masked: selectedConnection.masked,
+                })
+              }}
+            </p>
+            <div class="control-row">
+              <UiButton :disabled="connPending" @click="openConnectionEdit">
+                <template #icon><UiIcon name="edit" /></template>
+                {{ t('common.edit') }}
+              </UiButton>
+              <UiButton
+                variant="danger"
+                :disabled="connPending"
+                @click="confirmingConnectionDelete = true"
+              >
+                <template #icon><UiIcon name="trash" /></template>
+                {{ t('settings.connectionDelete') }}
+              </UiButton>
+            </div>
+          </template>
+
+          <UiBanner v-if="providerError" tone="error">{{ providerError }}</UiBanner>
+          <UiBanner v-else-if="providerMessage" tone="ok">{{ providerMessage }}</UiBanner>
+        </div>
+      </UiCard>
+
+      <UiCard v-if="!selectedConnection" :title="t('settings.openrouterTitle')">
         <div class="section">
           <!-- Only the stored state is worth a line. Absence explains itself: the field is
                empty and asks to be filled. -->
@@ -240,46 +589,78 @@ async function submitCustom() {
 
       <UiCard :title="t('settings.defaultsTitle')">
         <div class="section">
-          <UiBanner v-if="catalogError" tone="error">{{ catalogError }}</UiBanner>
-          <UiSkeleton v-else-if="!catalog" :rows="2" />
+          <!-- Model choice on a custom connection: its own live catalog, default prompts. -->
+          <template v-if="selectedConnection">
+            <UiBanner v-if="connectionModelsError" tone="error">
+              {{ connectionModelsError }}
+            </UiBanner>
+            <UiSkeleton v-else-if="connectionModelsPending && !connectionModels" :rows="2" />
 
-          <!-- One dropdown, saved as it changes: each recommended entry is a model *and*
-               the bbox format it is prompted for; "custom" is any image-input model on the
-               default prompts. -->
-          <div v-else class="control-row">
-            <UiField v-slot="{ id }" class="grow" :label="t('settings.defaultLabel')">
-              <UiSelect
-                :id="id"
-                :model-value="selection"
-                :disabled="defaultsPending"
-                @update:model-value="applySelection"
-              >
-                <option value="">{{ t('common.notSet') }}</option>
-                <optgroup :label="t('settings.recommendedGroup')">
-                  <option
-                    v-for="profile in catalog.profiles"
-                    :key="profile.id"
-                    :value="`profile:${profile.id}`"
-                    :disabled="!profile.available"
-                  >
-                    {{
-                      profile.available
-                        ? `${profile.name} · ${profile.model}`
-                        : t('settings.profileUnavailable', { name: profile.name })
-                    }}
+            <div v-else class="control-row">
+              <UiField v-slot="{ id }" class="grow" :label="t('settings.connectionModelLabel')">
+                <UiSelect
+                  :id="id"
+                  :model-value="connectionModelChoice"
+                  :disabled="defaultsPending"
+                  @update:model-value="applyConnectionModel"
+                >
+                  <option value="">{{ t('common.notSet') }}</option>
+                  <option v-for="model in connectionModels ?? []" :key="model.id" :value="model.id">
+                    {{ model.name ? `${model.name} · ${model.id}` : model.id }}
                   </option>
-                </optgroup>
-                <optgroup v-if="customModel" :label="t('settings.customGroup')">
-                  <option :value="`model:${customModel}`">{{ customOptionLabel }}</option>
-                </optgroup>
-              </UiSelect>
-            </UiField>
+                </UiSelect>
+              </UiField>
+              <UiButton
+                :disabled="connectionModelsPending"
+                :label="t('common.refresh')"
+                @click="loadConnectionModels"
+              >
+                <template #icon><UiIcon name="refresh" /></template>
+              </UiButton>
+            </div>
+            <p class="custom-note">{{ t('settings.connectionModelNote') }}</p>
+          </template>
 
-            <UiButton :disabled="defaultsPending" @click="openCustom">
-              <template #icon><UiIcon name="plus" /></template>
-              {{ t('settings.addCustom') }}
-            </UiButton>
-          </div>
+          <!-- Model choice on OpenRouter: preset profiles + at most one custom model. -->
+          <template v-else>
+            <UiBanner v-if="catalogError" tone="error">{{ catalogError }}</UiBanner>
+            <UiSkeleton v-else-if="!catalog" :rows="2" />
+
+            <div v-else class="control-row">
+              <UiField v-slot="{ id }" class="grow" :label="t('settings.defaultLabel')">
+                <UiSelect
+                  :id="id"
+                  :model-value="selection"
+                  :disabled="defaultsPending"
+                  @update:model-value="applySelection"
+                >
+                  <option value="">{{ t('common.notSet') }}</option>
+                  <optgroup :label="t('settings.recommendedGroup')">
+                    <option
+                      v-for="profile in catalog.profiles"
+                      :key="profile.id"
+                      :value="`profile:${profile.id}`"
+                      :disabled="!profile.available"
+                    >
+                      {{
+                        profile.available
+                          ? `${profile.name} · ${profile.model}`
+                          : t('settings.profileUnavailable', { name: profile.name })
+                      }}
+                    </option>
+                  </optgroup>
+                  <optgroup v-if="customModel" :label="t('settings.customGroup')">
+                    <option :value="`model:${customModel}`">{{ customOptionLabel }}</option>
+                  </optgroup>
+                </UiSelect>
+              </UiField>
+
+              <UiButton :disabled="defaultsPending" @click="openCustom">
+                <template #icon><UiIcon name="plus" /></template>
+                {{ t('settings.addCustom') }}
+              </UiButton>
+            </div>
+          </template>
 
           <UiBanner v-if="defaultsError" tone="error">{{ defaultsError }}</UiBanner>
           <UiBanner v-else-if="defaultsMessage" tone="ok">{{ defaultsMessage }}</UiBanner>
@@ -288,35 +669,51 @@ async function submitCustom() {
 
       <UiCard :title="t('settings.promptTitle')">
         <div class="section">
+          <UiBanner v-if="promptsError" tone="error">{{ promptsError }}</UiBanner>
+
           <p class="state">
-            {{ storedPrompt ? t('settings.promptStateCustom') : t('settings.promptStateDefault') }}
+            {{
+              selectedPrompt
+                ? t('settings.promptStateCustom', { name: selectedPrompt.name })
+                : t('settings.promptStateDefault')
+            }}
           </p>
 
-          <UiField v-slot="{ id }" :label="t('settings.promptLabel')">
-            <textarea
-              :id="id"
-              v-model="promptInput"
-              class="prompt-input"
-              rows="10"
-              spellcheck="false"
-              :disabled="promptPending"
-            />
-          </UiField>
-          <p class="custom-note">{{ t('settings.promptNote') }}</p>
-
           <div class="control-row">
-            <UiButton
-              variant="primary"
-              :loading="promptPending"
-              :disabled="!promptInput.trim()"
-              @click="savePrompt"
-            >
-              {{ t('common.save') }}
+            <UiField v-slot="{ id }" class="grow" :label="t('settings.promptLabel')">
+              <UiSelect
+                :id="id"
+                :model-value="promptChoice"
+                :disabled="promptPending"
+                @update:model-value="applyPromptChoice"
+              >
+                <option value="">{{ t('settings.promptDefaultOption') }}</option>
+                <option v-for="row in prompts" :key="row.id" :value="String(row.id)">
+                  {{ row.name }}
+                </option>
+              </UiSelect>
+            </UiField>
+
+            <UiButton :disabled="promptPending" @click="openPromptCreate">
+              <template #icon><UiIcon name="plus" /></template>
+              {{ t('settings.promptAdd') }}
             </UiButton>
-            <UiButton v-if="storedPrompt" :disabled="promptPending" @click="resetPrompt">
-              {{ t('settings.promptReset') }}
+            <UiButton v-if="selectedPrompt" :disabled="promptPending" @click="openPromptEdit">
+              <template #icon><UiIcon name="edit" /></template>
+              {{ t('common.edit') }}
+            </UiButton>
+            <UiButton
+              v-if="selectedPrompt"
+              variant="danger"
+              :disabled="promptPending"
+              @click="confirmingPromptDelete = true"
+            >
+              <template #icon><UiIcon name="trash" /></template>
+              {{ t('settings.promptDelete') }}
             </UiButton>
           </div>
+
+          <p class="custom-note">{{ t('settings.promptNote') }}</p>
 
           <UiBanner v-if="promptError" tone="error">{{ promptError }}</UiBanner>
           <UiBanner v-else-if="promptMessage" tone="ok">{{ promptMessage }}</UiBanner>
@@ -324,8 +721,100 @@ async function submitCustom() {
       </UiCard>
     </div>
 
+    <UiModal
+      v-if="connectionModal"
+      :title="
+        connectionModal.mode === 'create'
+          ? t('settings.connectionCreateTitle')
+          : t('settings.connectionEditTitle')
+      "
+      @close="connectionModal = null"
+    >
+      <form id="connection-form" class="modal-form" @submit.prevent="submitConnection">
+        <UiField v-slot="{ id }" :label="t('settings.connectionNameLabel')">
+          <UiTextInput :id="id" v-model="connName" required />
+        </UiField>
+        <UiField v-slot="{ id }" :label="t('settings.connectionUrlLabel')">
+          <UiTextInput
+            :id="id"
+            v-model="connUrl"
+            placeholder="https://proxy.example.com/openai/v1"
+            required
+          />
+        </UiField>
+        <p class="custom-note">{{ t('settings.connectionUrlNote') }}</p>
+        <UiField v-slot="{ id }" :label="t('settings.connectionKeyLabel')">
+          <UiTextInput
+            :id="id"
+            v-model="connKey"
+            type="password"
+            autocomplete="off"
+            :required="connectionModal.mode === 'create'"
+          />
+        </UiField>
+        <p v-if="connectionModal.mode === 'edit'" class="custom-note">
+          {{ t('settings.connectionKeyKeepNote') }}
+        </p>
+        <UiBanner v-if="connError" tone="error">{{ connError }}</UiBanner>
+      </form>
+      <template #footer>
+        <UiButton variant="ghost" :disabled="connPending" @click="connectionModal = null">
+          {{ t('common.cancel') }}
+        </UiButton>
+        <UiButton
+          variant="primary"
+          type="submit"
+          form="connection-form"
+          :loading="connPending"
+          :disabled="!connName.trim() || !connUrl.trim() || (connectionModal.mode === 'create' && !connKey.trim())"
+        >
+          {{ t('common.save') }}
+        </UiButton>
+      </template>
+    </UiModal>
+
+    <UiModal
+      v-if="promptModal"
+      :title="
+        promptModal.mode === 'create' ? t('settings.promptCreateTitle') : t('settings.promptEditTitle')
+      "
+      @close="promptModal = null"
+    >
+      <form id="prompt-form" class="modal-form" @submit.prevent="submitPrompt">
+        <UiField v-slot="{ id }" :label="t('settings.promptNameLabel')">
+          <UiTextInput :id="id" v-model="promptName" required />
+        </UiField>
+        <UiField v-slot="{ id }" :label="t('settings.promptTextLabel')">
+          <textarea
+            :id="id"
+            v-model="promptText"
+            class="prompt-input"
+            rows="12"
+            spellcheck="false"
+            :disabled="promptModalPending"
+          />
+        </UiField>
+        <p class="custom-note">{{ t('settings.promptNote') }}</p>
+        <UiBanner v-if="promptModalError" tone="error">{{ promptModalError }}</UiBanner>
+      </form>
+      <template #footer>
+        <UiButton variant="ghost" :disabled="promptModalPending" @click="promptModal = null">
+          {{ t('common.cancel') }}
+        </UiButton>
+        <UiButton
+          variant="primary"
+          type="submit"
+          form="prompt-form"
+          :loading="promptModalPending"
+          :disabled="!promptName.trim() || !promptText.trim()"
+        >
+          {{ t('common.save') }}
+        </UiButton>
+      </template>
+    </UiModal>
+
     <UiModal v-if="addingCustom" :title="t('settings.customTitle')" @close="addingCustom = false">
-      <form id="custom-model" class="custom-form" @submit.prevent="submitCustom">
+      <form id="custom-model" class="modal-form" @submit.prevent="submitCustom">
         <UiField v-slot="{ id }" :label="t('settings.customModelLabel')">
           <UiSelect :id="id" v-model="customChoice">
             <option value="" disabled>{{ t('common.notSet') }}</option>
@@ -367,6 +856,26 @@ async function submitCustom() {
       @confirm="removeOpenRouterKey"
       @cancel="confirmingDelete = false"
     />
+
+    <UiConfirmDialog
+      v-if="confirmingConnectionDelete"
+      :title="t('settings.connectionDelete')"
+      :message="t('settings.connectionDeleteConfirm')"
+      :confirm-label="t('common.delete')"
+      :pending="connPending"
+      @confirm="removeConnection"
+      @cancel="confirmingConnectionDelete = false"
+    />
+
+    <UiConfirmDialog
+      v-if="confirmingPromptDelete"
+      :title="t('settings.promptDelete')"
+      :message="t('settings.promptDeleteConfirm')"
+      :confirm-label="t('common.delete')"
+      :pending="promptPending"
+      @confirm="removePrompt"
+      @cancel="confirmingPromptDelete = false"
+    />
   </div>
 </template>
 
@@ -395,9 +904,10 @@ async function submitCustom() {
 .state {
   color: var(--text-secondary);
   max-width: 72ch;
+  overflow-wrap: anywhere;
 }
 
-.custom-form {
+.modal-form {
   display: grid;
   gap: var(--space-3);
 }

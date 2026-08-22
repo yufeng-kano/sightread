@@ -33,7 +33,7 @@ Worker updates `jobs.pages_done` and `job_pages` rows as pages finish; SSE endpo
 
 ## Dedup cache
 
-Key: `(user_id, sha256, model, profile, profile_version, pages_spec, prompt_sha256, PIPELINE_VERSION)`.
+Key: `(user_id, sha256, model, connection_id, profile, profile_version, pages_spec, prompt_sha256, PIPELINE_VERSION)` — `connection_id` because the same model id on two different endpoints is not the same model.
 
 - On `POST /v1/parse`, hash while streaming to disk; if a **succeeded** job matches the full key and `force` is not set → return its result immediately (200, `meta.cached: true`), delete the fresh upload, create no job.
 - **Only complete results are cache hits.** A result carrying page errors (a transient upstream failure, an unreadable page) is returned to its own job but never reused — the same upload reparses instead of replaying a degraded result forever.

@@ -50,8 +50,33 @@ export interface User {
 export interface UserSettings {
   default_model: string | null
   default_profile: string | null
-  /** Custom transcription prompt; null means the shipped default. */
-  system_prompt: string | null
+  /** Active upstream; null means the built-in OpenRouter (docs/api.md § Upstreams). */
+  default_connection_id: number | null
+  /** Selected prompt preset; null means the shipped default prompt. */
+  prompt_preset_id: number | null
+}
+
+/** A user-defined OpenAI-compatible endpoint; the API key only ever returns masked. */
+export interface ProviderConnection {
+  id: number
+  name: string
+  base_url: string
+  masked: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ConnectionModel {
+  id: string
+  name: string | null
+}
+
+export interface PromptPreset {
+  id: number
+  name: string
+  text: string
+  created_at: string
+  updated_at: string
 }
 
 export interface OpenRouterKeyState {
@@ -291,6 +316,57 @@ export function deleteOpenRouterKey(): Promise<void> {
 /** Partial update: only the fields present in the body change (docs/api.md). */
 export function putSettings(settings: Partial<UserSettings>): Promise<UserSettings> {
   return request('PUT', '/api/settings', settings)
+}
+
+// --- provider connections ---------------------------------------------------
+
+export function listConnections(): Promise<{ connections: ProviderConnection[] }> {
+  return request('GET', '/api/connections')
+}
+
+export function createConnection(body: {
+  name: string
+  base_url: string
+  api_key: string
+}): Promise<ProviderConnection> {
+  return request('POST', '/api/connections', body)
+}
+
+export function updateConnection(
+  id: number,
+  body: Partial<{ name: string; base_url: string; api_key: string }>,
+): Promise<ProviderConnection> {
+  return request('PUT', `/api/connections/${id}`, body)
+}
+
+export function deleteConnection(id: number): Promise<void> {
+  return request<undefined>('DELETE', `/api/connections/${id}`)
+}
+
+/** The connection's live model catalog, fetched server-side with its stored key. */
+export function listConnectionModels(id: number): Promise<{ data: ConnectionModel[] }> {
+  return request('GET', `/api/connections/${id}/models`)
+}
+
+// --- prompt presets ---------------------------------------------------------
+
+export function listPrompts(): Promise<{ prompts: PromptPreset[] }> {
+  return request('GET', '/api/prompts')
+}
+
+export function createPrompt(body: { name: string; text: string }): Promise<PromptPreset> {
+  return request('POST', '/api/prompts', body)
+}
+
+export function updatePrompt(
+  id: number,
+  body: Partial<{ name: string; text: string }>,
+): Promise<PromptPreset> {
+  return request('PUT', `/api/prompts/${id}`, body)
+}
+
+export function deletePrompt(id: number): Promise<void> {
+  return request<undefined>('DELETE', `/api/prompts/${id}`)
 }
 
 export function getUsage(days: number): Promise<UsageResponse> {

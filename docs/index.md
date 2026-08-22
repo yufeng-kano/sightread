@@ -24,7 +24,7 @@ Hosted, multi-user **vision document parsing** service. Users sign in with Googl
 - **PDF engine:** Poppler CLI (`pdftoppm`, `pdfinfo`) via subprocess — never a linked PDF library. See [parsing.md](./parsing.md).
 - **Web:** Nuxt (latest stable) + TypeScript + `@nuxtjs/i18n` (en, zh-TW), pnpm.
 - **Data:** PostgreSQL only — relational state **and** job queue (`FOR UPDATE SKIP LOCKED`). No Redis, no message broker.
-- **Upstream:** OpenRouter only, with each user's own key. Model list fetched live from `/api/v1/models` filtered to image-input models — never hard-coded.
+- **Upstream:** OpenRouter by default, with each user's own key; model list fetched live from `/api/v1/models` filtered to image-input models — never hard-coded. Users may instead route vision calls through a **provider connection**: their own OpenAI-compatible Chat Completions endpoint (base URL + key, e.g. a kano-proxy `/openai/v1` base), models listed live from that endpoint's `/models` ([api.md](./api.md) § Upstreams).
 - **Deploy:** docker-compose on a single server, Caddy for TLS + routing. Environments: local + production only.
 
 ## Product one-liner

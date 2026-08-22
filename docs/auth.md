@@ -13,10 +13,12 @@ Five credential kinds, strictly separated. No password login anywhere.
 - Format `sr_<32 random url-safe chars>`; shown exactly once at creation; stored as SHA-256 hash + display prefix (`sr_...abc4`).
 - Sent as `Authorization: Bearer sr_...` on `/v1/*`. Constant-time lookup by hash. Revocation = soft delete.
 
-## 3. User's OpenRouter key — encrypted, never hashed (we must use it)
+## 3. User's upstream keys — encrypted, never hashed (we must use them)
 
-- AES-256-GCM, key derived from `SECRET_KEY` via HKDF (context string `openrouter-key-v1`), random nonce per encryption.
-- Validated at save time with `GET https://openrouter.ai/api/v1/key` using the candidate key; invalid → 400, nothing stored.
+Two flavours, same rules: the OpenRouter key (`openrouter_keys`, one per user) and the API key of each user-defined provider connection (`provider_connections`, an OpenAI-compatible endpoint such as a kano-proxy `/openai/v1` base — [api.md](./api.md) § Provider connections).
+
+- AES-256-GCM, key derived from `SECRET_KEY` via HKDF (context strings `openrouter-key-v1` and `provider-connection-key-v1`), random nonce per encryption.
+- Validated at save time using the candidate key — OpenRouter via `GET https://openrouter.ai/api/v1/key`, a connection via `GET {base_url}/models` on its own endpoint; invalid → 400, nothing stored. A connection's `base_url` must be `http(s)`, and outside `APP_ENV=local` must be `https` and must not point at localhost/link-local/private-range literals (the app fetches it server-side).
 - API/UI only ever return the masked form. The plaintext exists in memory only for the duration of an upstream call. **Never logged, never in error messages.**
 
 ## 4. OAuth 2.1 authorization server — for Claude Connectors
