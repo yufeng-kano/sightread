@@ -12,10 +12,12 @@
  * code, display math and figure placeholders (docs/parsing.md § Prompt). Anything else stays
  * a paragraph, which renders as its own source text rather than disappearing.
  *
- * It is also flat, and knowingly so: a nested list comes out as one level and inline
- * emphasis comes out as its source characters. The content survives, the structure does not.
- * The alternative is not a deeper version of this — it is rendering through a real GFM
- * parser, which is a dependency and a sanitisation decision (docs/web.md § Result viewer).
+ * It is also flat, and knowingly so: a nested list comes out as one level, inline emphasis
+ * comes out as its source characters, and a fence is closed by any fence rather than by a
+ * matching one — so a `~~~` block containing a literal ``` line ends early. The content
+ * survives, the structure does not. The alternative is not a deeper version of this — it is
+ * rendering through a real GFM parser, which is a dependency and a sanitisation decision
+ * (docs/web.md § Result viewer).
  */
 
 /** `[ymin, xmin, ymax, xmax]`, 0–1000 normalized — the `bbox_format` the result declares. */
