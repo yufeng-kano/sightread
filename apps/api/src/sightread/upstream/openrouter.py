@@ -166,7 +166,8 @@ async def normalize_base_url(raw: str, app_env: str) -> str:
     try:
         parts = urlsplit(candidate)
         host = parts.hostname
-    except ValueError as exc:  # e.g. a malformed bracketed IPv6 host — a typo, not a 500
+        parts.port  # noqa: B018 - raises ValueError for a malformed/out-of-range port
+    except ValueError as exc:  # a bad IPv6 bracket or port is a typo, not a 500
         raise ApiError(400, "invalid_request", "base_url must be an http(s) URL") from exc
     if parts.scheme not in ("http", "https") or not host:
         raise ApiError(400, "invalid_request", "base_url must be an http(s) URL")
@@ -461,6 +462,10 @@ async def _chat_with_image(
         payload = json.loads(raw)
     except ValueError as exc:
         raise UpstreamError("The upstream returned a non-JSON body") from exc
+    if not isinstance(payload, dict):
+        # A non-object body (e.g. `[]`) is the endpoint's fault — a failed page, never
+        # an internal error that kills the whole job.
+        raise UpstreamError("The upstream returned an unreadable body")
     _raise_for_error_payload(payload)
     return _message_text(payload), _usage(payload, connection.kind)
 

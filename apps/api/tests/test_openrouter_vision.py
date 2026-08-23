@@ -169,6 +169,16 @@ async def test_an_openai_connection_calls_its_own_endpoint_without_the_usage_fla
 
 
 @respx.mock
+async def test_a_non_object_completion_is_a_page_failure_not_a_crash(key, documents) -> None:
+    """A `[]` body must surface as UpstreamError (a failed page), never an AttributeError
+    that marks the whole job as an internal error."""
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=[]))
+
+    with pytest.raises(UpstreamError):
+        await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+
+
+@respx.mock
 async def test_an_oversized_completion_fails_the_call(key, documents) -> None:
     """The response body cap applies to vision completions too (docs/parsing.md)."""
     respx.post(CHAT_URL).mock(

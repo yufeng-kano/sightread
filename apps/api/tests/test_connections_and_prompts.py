@@ -255,11 +255,12 @@ async def test_base_url_hostnames_are_resolved_and_checked(monkeypatch) -> None:
     assert await normalize_base_url("https://whatever.internal/v1", "local") is not None
 
 
-async def test_a_malformed_ipv6_host_is_a_400_not_a_500() -> None:
+async def test_a_malformed_host_or_port_is_a_400_not_a_500() -> None:
     for env in ("local", "production"):
-        with pytest.raises(ApiError) as raised:
-            await normalize_base_url("https://[bad/v1", env)
-        assert raised.value.status_code == 400
+        for bad in ("https://[bad/v1", "https://proxy.example:bad/v1", "https://proxy.example:99999/v1"):
+            with pytest.raises(ApiError) as raised:
+                await normalize_base_url(bad, env)
+            assert raised.value.status_code == 400
 
 
 async def test_base_url_userinfo_is_refused_everywhere() -> None:

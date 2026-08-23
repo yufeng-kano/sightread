@@ -621,7 +621,15 @@ async def put_settings(body: SettingsPut, user: SessionUser, db: DbSession):
         raise ApiError(
             400, "invalid_request", "Profiles run on OpenRouter only; clear one of the two"
         )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        # Another tab deleted the selected connection/prompt between the ownership
+        # pre-check and this commit — an ordinary selection race, not a 500.
+        await db.rollback()
+        raise ApiError(
+            409, "invalid_request", "The selected connection or prompt was just deleted"
+        ) from exc
     return {
         "default_model": row.default_model,
         "default_profile": row.default_profile,

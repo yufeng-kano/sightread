@@ -62,10 +62,20 @@ const selectedConnection = computed(
   () => connections.value.find((row) => String(row.id) === providerChoice.value) ?? null,
 )
 
+/** A custom connection is selected but the connections list has not (yet) delivered its
+    row — a failed list must not be mistaken for "OpenRouter is active", so the key and
+    model controls hold back until the selection resolves. */
+const providerUnresolved = computed(
+  () => providerChoice.value !== '' && selectedConnection.value === null,
+)
+
 /** Provider and model updates write overlapping settings columns, so the two pickers
     disable together — concurrent PUTs could otherwise pair provider B with a model
-    picked from provider A's catalog. */
-const targetBusy = computed(() => providerPending.value || defaultsPending.value)
+    picked from provider A's catalog. The provider picker also waits for the connections
+    list: switching against an unloaded list would be flying blind. */
+const targetBusy = computed(
+  () => providerPending.value || defaultsPending.value || !connectionsData.value,
+)
 
 /** Switching providers also clears the model/profile pair: it belonged to the old catalog. */
 async function applyProvider(value: string) {
@@ -180,6 +190,9 @@ async function removeConnection() {
 const connectionModels = ref<ConnectionModel[] | null>(null)
 const connectionModelsPending = ref(false)
 const connectionModelsError = ref<string | null>(null)
+/** Request generation: an id alone cannot tell a pre-edit request from the reload after
+    an edit of the same connection, so every load bumps this and stale answers drop. */
+let connectionModelsSeq = 0
 
 async function loadConnectionModels() {
   const row = selectedConnection.value
@@ -188,21 +201,22 @@ async function loadConnectionModels() {
     return
   }
   const requestedId = row.id
+  const seq = ++connectionModelsSeq
   connectionModelsPending.value = true
   connectionModelsError.value = null
   try {
     const data = (await listConnectionModels(requestedId)).data
-    // A slow answer for a connection that is no longer selected must not fill the
-    // current picker with the wrong catalog — drop it.
-    if (selectedConnection.value?.id === requestedId) {
+    // Only the newest request for the still-selected connection may fill the picker —
+    // a slow answer from before a switch or an edit would show the wrong catalog.
+    if (seq === connectionModelsSeq && selectedConnection.value?.id === requestedId) {
       connectionModels.value = data
     }
   } catch (error) {
-    if (selectedConnection.value?.id === requestedId) {
+    if (seq === connectionModelsSeq && selectedConnection.value?.id === requestedId) {
       connectionModelsError.value = await resolve(error)
     }
   } finally {
-    if (selectedConnection.value?.id === requestedId) {
+    if (seq === connectionModelsSeq && selectedConnection.value?.id === requestedId) {
       connectionModelsPending.value = false
     }
   }
@@ -553,7 +567,10 @@ async function removePrompt() {
         </div>
       </UiCard>
 
-      <UiCard v-if="!selectedConnection" :title="t('settings.openrouterTitle')">
+      <UiCard
+        v-if="!selectedConnection && !providerUnresolved"
+        :title="t('settings.openrouterTitle')"
+      >
         <div class="section">
           <!-- Only the stored state is worth a line. Absence explains itself: the field is
                empty and asks to be filled. -->
@@ -604,6 +621,10 @@ async function removePrompt() {
 
       <UiCard :title="t('settings.defaultsTitle')">
         <div class="section">
+          <!-- A selected connection whose row has not arrived (list failed or loading)
+               must not fall through to the OpenRouter controls. -->
+          <UiSkeleton v-if="providerUnresolved" :rows="2" />
+
           <!-- Model choice on a custom connection: its own live catalog, default prompts.
                The error banner renders beside the last good catalog, never instead of it —
                a failed refresh keeps its data (docs/web.md). -->
@@ -639,7 +660,7 @@ async function removePrompt() {
           </template>
 
           <!-- Model choice on OpenRouter: preset profiles + at most one custom model. -->
-          <template v-else>
+          <template v-else-if="!providerUnresolved">
             <UiBanner v-if="catalogError" tone="error">{{ catalogError }}</UiBanner>
             <UiSkeleton v-else-if="!catalog" :rows="2" />
 
