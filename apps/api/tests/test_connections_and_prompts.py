@@ -210,11 +210,11 @@ def _fake_getaddrinfo(host: str, *args, **kwargs):
     return [(0, 0, 0, "", (resolved[host], 0))]
 
 
-def test_base_url_rules_outside_local(monkeypatch) -> None:
+async def test_base_url_rules_outside_local(monkeypatch) -> None:
     from sightread.upstream import openrouter
 
     monkeypatch.setattr(openrouter, "_getaddrinfo", _fake_getaddrinfo)
-    assert normalize_base_url(f" {BASE}/ ", "production") == BASE
+    assert await normalize_base_url(f" {BASE}/ ", "production") == BASE
     for bad in (
         "http://proxy.example/openai/v1",  # https only
         "https://localhost/v1",
@@ -233,12 +233,12 @@ def test_base_url_rules_outside_local(monkeypatch) -> None:
         "not a url",
     ):
         with pytest.raises(ApiError):
-            normalize_base_url(bad, "production")
+            await normalize_base_url(bad, "production")
     # Local development may point at a local endpoint over plain http.
-    assert normalize_base_url("http://127.0.0.1:8787/openai/v1", "local") is not None
+    assert await normalize_base_url("http://127.0.0.1:8787/openai/v1", "local") is not None
 
 
-def test_base_url_hostnames_are_resolved_and_checked(monkeypatch) -> None:
+async def test_base_url_hostnames_are_resolved_and_checked(monkeypatch) -> None:
     """A name whose DNS (or /etc/hosts) answer is non-global is refused at save time —
     `ip6-localhost` → ::1 and an attacker domain → 10.x both count (docs/auth.md § 3)."""
     from sightread.upstream import openrouter
@@ -250,26 +250,42 @@ def test_base_url_hostnames_are_resolved_and_checked(monkeypatch) -> None:
         "https://does-not-resolve.example/v1",
     ):
         with pytest.raises(ApiError):
-            normalize_base_url(bad, "production")
+            await normalize_base_url(bad, "production")
     # Local skips the resolution check entirely — no DNS side effects on save.
-    assert normalize_base_url("https://whatever.internal/v1", "local") is not None
+    assert await normalize_base_url("https://whatever.internal/v1", "local") is not None
 
 
-def test_a_malformed_ipv6_host_is_a_400_not_a_500() -> None:
+async def test_a_malformed_ipv6_host_is_a_400_not_a_500() -> None:
     for env in ("local", "production"):
         with pytest.raises(ApiError) as raised:
-            normalize_base_url("https://[bad/v1", env)
+            await normalize_base_url("https://[bad/v1", env)
         assert raised.value.status_code == 400
 
 
-def test_base_url_userinfo_is_refused_everywhere() -> None:
+async def test_base_url_userinfo_is_refused_everywhere() -> None:
     """`base_url` is stored and displayed in plaintext, so credentials must not ride
     inside it — in any environment (docs/auth.md § 3)."""
     for env in ("local", "production"):
         with pytest.raises(ApiError):
-            normalize_base_url("https://user:password@proxy.example/v1", env)
+            await normalize_base_url("https://user:password@proxy.example/v1", env)
         with pytest.raises(ApiError):
-            normalize_base_url("https://token@proxy.example/v1", env)
+            await normalize_base_url("https://token@proxy.example/v1", env)
+
+
+@respx.mock
+async def test_an_oversized_model_list_is_an_upstream_error() -> None:
+    """A user-controlled endpoint must not be able to exhaust memory with an unbounded
+    body (docs/parsing.md § Upstream usage)."""
+    from sightread.upstream.openrouter import fetch_connection_models
+
+    respx.get(MODELS_URL).mock(
+        return_value=httpx.Response(
+            200, content=b"x" * 1024, headers={"content-type": "application/json"}
+        )
+    )
+    with pytest.raises(ApiError) as raised:
+        await fetch_connection_models(BASE, "sk-kano-proxy-secret", max_bytes=64)
+    assert raised.value.status_code == 502
 
 
 # --- prompt presets -------------------------------------------------------------------
@@ -444,6 +460,64 @@ async def test_deleting_a_connection_never_relabels_its_jobs_as_openrouter(
     status = (await client.get(f"/v1/jobs/{job_id}")).json()
     assert status["status"] == "failed"
     assert status["error"] == "the provider connection for this job no longer exists"
+
+
+@respx.mock
+async def test_a_queued_job_reconciles_its_endpoint_snapshot_at_claim_time(
+    make_client, sessionmaker, documents
+) -> None:
+    """If the connection's URL changes while a job sits queued, the worker runs against
+    the new endpoint and rewrites the job's snapshot so the dedup cache is keyed by the
+    URL that actually produced the result (docs/jobs.md § Dedup)."""
+    respx.get(MODELS_URL).mock(side_effect=_models_ok)
+    moved_base = "https://moved.example/openai/v1"
+    respx.get(f"{moved_base}/models").mock(side_effect=_models_ok)
+    moved_chat = respx.post(f"{moved_base}/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "# Page"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+    )
+
+    client = make_client()
+    assert (await client.post("/api/auth/dev-login", headers=CSRF_HEADERS)).status_code == 200
+    created = await _create_connection(client)
+    await client.put(
+        "/api/settings",
+        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        headers=CSRF_HEADERS,
+    )
+    key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
+    client.headers["Authorization"] = f"Bearer {key.json()['key']}"
+
+    accepted = await client.post(
+        "/v1/parse",
+        files={"file": ("tiny.png", documents["png"].read_bytes(), "image/png")},
+    )
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["job_id"]
+
+    moved = await client.put(
+        f"/api/connections/{created['id']}",
+        json={"base_url": moved_base},
+        headers=CSRF_HEADERS,
+    )
+    assert moved.status_code == 200, moved.text
+
+    settings = client.app.state.settings
+    async with sessionmaker() as db:
+        claimed = await claim_next_job(db, settings.max_jobs_per_user)
+    assert str(claimed) == job_id
+    await run_job(sessionmaker, settings, claimed, asyncio.Semaphore(2))
+
+    assert moved_chat.called
+    async with sessionmaker() as db:
+        job = (await db.execute(select(Job).where(Job.id == uuid.UUID(job_id)))).scalar_one()
+        assert job.status == "succeeded"
+        assert job.connection_base_url == moved_base
 
 
 @respx.mock

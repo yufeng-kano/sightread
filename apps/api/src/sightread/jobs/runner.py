@@ -107,6 +107,8 @@ class RunState:
     """Cross-page state for one run: what the fan-out has to agree about."""
 
     budget: VisionBudget
+    # UPSTREAM_RESPONSE_MAX_BYTES, carried here so page tasks need no Settings.
+    max_response_bytes: int = 33_554_432
     payment_failures: int = 0
 
 
@@ -206,7 +208,13 @@ async def _process_pdf_page(
             state,
             outcome,
             lambda: transcribe_page(
-                connection, job.model, job_prompt(job), job.bbox_format, image, page_no
+                connection,
+                job.model,
+                job_prompt(job),
+                job.bbox_format,
+                image,
+                page_no,
+                max_response_bytes=state.max_response_bytes,
             ),
         )
         if transcription is not None:
@@ -236,7 +244,13 @@ async def _process_image(
             state,
             outcome,
             lambda: transcribe_page(
-                connection, job.model, job_prompt(job), job.bbox_format, normalized.path, 1
+                connection,
+                job.model,
+                job_prompt(job),
+                job.bbox_format,
+                normalized.path,
+                1,
+                max_response_bytes=state.max_response_bytes,
             ),
         )
         if transcription is not None:
@@ -322,6 +336,16 @@ async def run_job(
         if job is None or job.status != "running":
             return
         connection = await load_connection(db, settings.secret_key, job.user_id, job.connection_id)
+        if (
+            connection is not None
+            and job.connection_id is not None
+            and job.connection_base_url != connection.base_url
+        ):
+            # The connection's URL changed while the job sat queued. The dedup key must
+            # name the endpoint that actually produced the result, not the one selected
+            # at submission (docs/jobs.md § Dedup).
+            job.connection_base_url = connection.base_url
+            await db.commit()
 
     if connection is None:
         error = (
@@ -335,7 +359,10 @@ async def run_job(
     source = Path(job.source_path or "")
     work_dir = Path(settings.upload_dir) / str(job.id)
     work_dir.mkdir(parents=True, exist_ok=True)
-    state = RunState(budget=VisionBudget(settings.vision_concurrency_per_job))
+    state = RunState(
+        budget=VisionBudget(settings.vision_concurrency_per_job),
+        max_response_bytes=settings.upstream_response_max_bytes,
+    )
 
     try:
         outcomes = await _process_job(

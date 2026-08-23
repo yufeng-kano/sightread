@@ -7,8 +7,10 @@ Key material is never logged and never appears in raised messages.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ipaddress
+import json
 import re
 import socket
 import time
@@ -39,6 +41,9 @@ MODELS_CACHE_TTL_SECONDS = 3600
 REQUEST_TIMEOUT_SECONDS = 20.0
 # A page of dense text can take a vision model a while; this is the whole-request ceiling.
 CHAT_TIMEOUT_SECONDS = 180.0
+# Fallback body cap when a caller has no Settings at hand; the deployed value is
+# UPSTREAM_RESPONSE_MAX_BYTES (config.py), threaded in by control routes and the worker.
+DEFAULT_RESPONSE_MAX_BYTES = 33_554_432
 
 DATA_URL_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
@@ -125,10 +130,14 @@ def _literal_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | No
 _getaddrinfo = socket.getaddrinfo
 
 
-def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
-    """Every address `host` currently resolves to; 400 when it resolves to nothing."""
+async def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Every address `host` currently resolves to; 400 when it resolves to nothing.
+
+    Resolution runs in a worker thread: a slow or black-holed DNS name must not stall the
+    event loop for every other request while the resolver waits it out.
+    """
     try:
-        infos = _getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        infos = await asyncio.to_thread(_getaddrinfo, host, None, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ApiError(400, "invalid_request", "base_url's host could not be resolved") from exc
     addresses = []
@@ -142,7 +151,7 @@ def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv
     return addresses
 
 
-def normalize_base_url(raw: str, app_env: str) -> str:
+async def normalize_base_url(raw: str, app_env: str) -> str:
     """Validate and canonicalize a connection's base URL (docs/auth.md § 3).
 
     The app fetches this URL server-side, so outside local it must be https and must not
@@ -175,38 +184,70 @@ def normalize_base_url(raw: str, app_env: str) -> str:
         if host == "localhost" or host.endswith(".localhost"):
             raise ApiError(400, "invalid_request", "base_url must be a public endpoint")
         literal = _literal_ip(host)
-        addresses = [literal] if literal is not None else _resolved_addresses(host)
+        addresses = [literal] if literal is not None else await _resolved_addresses(host)
         if any(not address.is_global for address in addresses):
             raise ApiError(400, "invalid_request", "base_url must be a public endpoint")
     return candidate
 
 
-async def stored_connection_models(base_url: str, secret_key: str, ciphertext: bytes) -> list[dict]:
+class ResponseTooLarge(Exception):
+    """An upstream body exceeded the cap (docs/parsing.md § Upstream usage)."""
+
+
+async def _read_body_capped(response: httpx.Response, max_bytes: int) -> bytes:
+    """Read a streamed response body, aborting past `max_bytes` — a user-controlled
+    endpoint must not be able to exhaust memory with an unbounded reply."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > max_bytes:
+            raise ResponseTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+async def stored_connection_models(
+    base_url: str,
+    secret_key: str,
+    ciphertext: bytes,
+    max_bytes: int = DEFAULT_RESPONSE_MAX_BYTES,
+) -> list[dict]:
     """`fetch_connection_models` for a stored key — decryption stays inside this module."""
-    return await fetch_connection_models(base_url, decrypt_connection_key(secret_key, ciphertext))
+    return await fetch_connection_models(
+        base_url, decrypt_connection_key(secret_key, ciphertext), max_bytes=max_bytes
+    )
 
 
-async def fetch_connection_models(base_url: str, api_key: str) -> list[dict]:
+async def fetch_connection_models(
+    base_url: str, api_key: str, max_bytes: int = DEFAULT_RESPONSE_MAX_BYTES
+) -> list[dict]:
     """The model catalog of an OpenAI-compatible endpoint — also the save-time key check.
 
     `GET {base_url}/models` is free on every OpenAI-format server we care about, so it
     doubles as validation without spending the user's money (docs/auth.md § 3).
     """
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-            response = await client.get(
-                f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
-            )
+        async with (
+            httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client,
+            client.stream(
+                "GET", f"{base_url}/models", headers={"Authorization": f"Bearer {api_key}"}
+            ) as response,
+        ):
+            if response.status_code in (401, 403):
+                raise ApiError(400, "invalid_request", "The endpoint rejected this API key")
+            if response.status_code >= 400:
+                raise ApiError(
+                    502, "upstream", f"The endpoint returned {response.status_code} for /models"
+                )
+            body = await _read_body_capped(response, max_bytes)
     except httpx.HTTPError as exc:
         raise ApiError(502, "upstream", "Could not reach the connection's endpoint") from exc
-    if response.status_code in (401, 403):
-        raise ApiError(400, "invalid_request", "The endpoint rejected this API key")
-    if response.status_code >= 400:
-        raise ApiError(
-            502, "upstream", f"The endpoint returned {response.status_code} for /models"
-        )
+    except ResponseTooLarge as exc:
+        raise ApiError(502, "upstream", "The endpoint's model list exceeded the size cap") from exc
+
     try:
-        payload = response.json()
+        payload = json.loads(body)
     except ValueError as exc:
         raise ApiError(502, "upstream", "The endpoint returned a non-JSON model list") from exc
     # An upstream answering `[]` (or any non-object) is a broken endpoint, not our bug.
@@ -325,13 +366,20 @@ def _int(value: object) -> int:
         return 0
 
 
-def _usage(payload: dict) -> Usage:
-    """OpenRouter always returns `usage`; cost is the real amount billed to the user."""
+def _usage(payload: dict, kind: str) -> Usage:
+    """Token counts from any upstream; cost trusted from OpenRouter only.
+
+    A custom endpoint's claimed `cost` is ignored and recorded as 0 — usage totals must
+    never mix OpenRouter's real billing with numbers an arbitrary proxy invents
+    (docs/parsing.md § Upstream usage).
+    """
     raw = payload.get("usage") or {}
-    try:
-        cost = Decimal(str(raw.get("cost", "0"))).quantize(Decimal("0.000001"))
-    except (InvalidOperation, ValueError):
-        cost = Decimal("0")
+    cost = Decimal("0")
+    if kind == KIND_OPENROUTER:
+        try:
+            cost = Decimal(str(raw.get("cost", "0"))).quantize(Decimal("0.000001"))
+        except (InvalidOperation, ValueError):
+            cost = Decimal("0")
     return Usage(
         prompt_tokens=_int(raw.get("prompt_tokens")),
         completion_tokens=_int(raw.get("completion_tokens")),
@@ -366,7 +414,7 @@ def _raise_for_error_payload(payload: dict) -> None:
 
 
 async def _chat_with_image(
-    connection: Connection, model: str, prompt: str, image: Path
+    connection: Connection, model: str, prompt: str, image: Path, max_bytes: int
 ) -> tuple[str, Usage]:
     body: dict = {
         "model": model,
@@ -385,31 +433,36 @@ async def _chat_with_image(
         # OpenRouter-only: a generic OpenAI server would reject the unknown field.
         body["usage"] = {"include": True}
     try:
-        async with httpx.AsyncClient(timeout=CHAT_TIMEOUT_SECONDS) as client:
-            response = await client.post(
+        async with (
+            httpx.AsyncClient(timeout=CHAT_TIMEOUT_SECONDS) as client,
+            client.stream(
+                "POST",
                 f"{connection.base_url}/chat/completions",
                 headers={"Authorization": connection.authorization()},
                 json=body,
-            )
+            ) as response,
+        ):
+            if response.status_code == 429:
+                retry_after = response.headers.get("retry-after")
+                raise RateLimited(float(retry_after) if (retry_after or "").isdigit() else None)
+            if response.status_code == 402:
+                raise PaymentRequired()
+            if response.status_code in (401, 403):
+                raise UpstreamError("The upstream rejected the stored key", fatal=True)
+            if response.status_code >= 400:
+                raise UpstreamError(f"The upstream returned {response.status_code}")
+            raw = await _read_body_capped(response, max_bytes)
     except httpx.HTTPError as exc:
         raise UpstreamError("The upstream was unreachable") from exc
-
-    if response.status_code == 429:
-        retry_after = response.headers.get("retry-after")
-        raise RateLimited(float(retry_after) if (retry_after or "").isdigit() else None)
-    if response.status_code == 402:
-        raise PaymentRequired()
-    if response.status_code in (401, 403):
-        raise UpstreamError("The upstream rejected the stored key", fatal=True)
-    if response.status_code >= 400:
-        raise UpstreamError(f"The upstream returned {response.status_code}")
+    except ResponseTooLarge as exc:
+        raise UpstreamError("The upstream response exceeded the size cap") from exc
 
     try:
-        payload = response.json()
+        payload = json.loads(raw)
     except ValueError as exc:
         raise UpstreamError("The upstream returned a non-JSON body") from exc
     _raise_for_error_payload(payload)
-    return _message_text(payload), _usage(payload)
+    return _message_text(payload), _usage(payload, connection.kind)
 
 
 async def transcribe_page(
@@ -419,6 +472,7 @@ async def transcribe_page(
     bbox_format: str,
     image: Path,
     page_no: int,
+    max_response_bytes: int = DEFAULT_RESPONSE_MAX_BYTES,
 ) -> PageTranscription:
     """Transcribe one rendered page; the answer carries its own figure placeholders.
 
@@ -426,5 +480,5 @@ async def transcribe_page(
     with stray braces must never break the call (docs/parsing.md § Prompts).
     """
     prompt = prompt_template.replace("{page}", str(page_no)).replace("{bbox_format}", bbox_format)
-    text, usage = await _chat_with_image(connection, model, prompt, image)
+    text, usage = await _chat_with_image(connection, model, prompt, image, max_response_bytes)
     return PageTranscription(markdown=_CODE_FENCE_RE.sub("", text.strip()), usage=usage)

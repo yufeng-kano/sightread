@@ -309,14 +309,18 @@ def _connection_payload(row: ProviderConnection) -> dict:
     }
 
 
-async def _owned_connection(db: DbSession, user_id: int, connection_id: int) -> ProviderConnection:
-    row = (
-        await db.execute(
-            select(ProviderConnection).where(
-                ProviderConnection.id == connection_id, ProviderConnection.user_id == user_id
-            )
-        )
-    ).scalar_one_or_none()
+async def _owned_connection(
+    db: DbSession, user_id: int, connection_id: int, for_update: bool = False
+) -> ProviderConnection:
+    # `for_update` serializes concurrent edits of one connection (PostgreSQL row lock;
+    # compiled away on the SQLite test fallback): two edits validating different URL/key
+    # pairs must not interleave into a stored pair nobody validated.
+    query = select(ProviderConnection).where(
+        ProviderConnection.id == connection_id, ProviderConnection.user_id == user_id
+    )
+    if for_update:
+        query = query.with_for_update()
+    row = (await db.execute(query)).scalar_one_or_none()
     if row is None:
         raise ApiError(404, "invalid_request", "No such connection")
     return row
@@ -357,11 +361,11 @@ async def create_connection(
     name = body.name.strip()
     if not name:
         raise ApiError(400, "invalid_request", "The connection needs a name")
-    base_url = normalize_base_url(body.base_url, settings.app_env)
+    base_url = await normalize_base_url(body.base_url, settings.app_env)
     candidate = body.api_key.strip()
     await _refuse_duplicate_connection_name(db, user.id, name)
     # `GET {base_url}/models` doubles as the save-time key check (docs/auth.md § 3).
-    await fetch_connection_models(base_url, candidate)
+    await fetch_connection_models(base_url, candidate, settings.upstream_response_max_bytes)
 
     row = ProviderConnection(
         user_id=user.id,
@@ -383,7 +387,7 @@ async def update_connection(
     db: DbSession,
     settings: AppSettings,
 ):
-    row = await _owned_connection(db, user.id, connection_id)
+    row = await _owned_connection(db, user.id, connection_id, for_update=True)
     provided = body.model_fields_set
 
     name = body.name.strip() if body.name else row.name
@@ -393,19 +397,21 @@ async def update_connection(
         await _refuse_duplicate_connection_name(db, user.id, name, exclude_id=row.id)
 
     base_url = (
-        normalize_base_url(body.base_url, settings.app_env)
+        await normalize_base_url(body.base_url, settings.app_env)
         if "base_url" in provided and body.base_url
         else row.base_url
     )
     candidate = body.api_key.strip() if "api_key" in provided and body.api_key else None
 
     if candidate is not None:
-        await fetch_connection_models(base_url, candidate)
+        await fetch_connection_models(base_url, candidate, settings.upstream_response_max_bytes)
         row.ciphertext = encrypt_connection_key(settings.secret_key, candidate)
         row.masked = mask_openrouter_key(candidate)
     elif base_url != row.base_url:
         # A moved endpoint must still accept the stored key before we point jobs at it.
-        await stored_connection_models(base_url, settings.secret_key, row.ciphertext)
+        await stored_connection_models(
+            base_url, settings.secret_key, row.ciphertext, settings.upstream_response_max_bytes
+        )
 
     row.name = name
     row.base_url = base_url
@@ -441,7 +447,9 @@ async def connection_models(
 ):
     """The connection's live model catalog, fetched with its stored key (docs/api.md)."""
     row = await _owned_connection(db, user.id, connection_id)
-    models = await stored_connection_models(row.base_url, settings.secret_key, row.ciphertext)
+    models = await stored_connection_models(
+        row.base_url, settings.secret_key, row.ciphertext, settings.upstream_response_max_bytes
+    )
     return {"data": models}
 
 

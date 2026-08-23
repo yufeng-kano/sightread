@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     upload_dir: str = "/data/uploads"
     # Cap on a user's custom system prompt (docs/api.md § Limits).
     system_prompt_max_chars: int = 8000
+    # Cap on any upstream response body — a user-controlled endpoint must not be able to
+    # exhaust memory with an unbounded reply (docs/parsing.md § Upstream usage).
+    upstream_response_max_bytes: int = 33_554_432
     # Upload tickets minted by the MCP `parse` tool (docs/auth.md § 5).
     upload_ticket_ttl_seconds: int = 3600
     upload_ticket_rate_per_hour: int = 30

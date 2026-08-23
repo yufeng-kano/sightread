@@ -62,6 +62,11 @@ const selectedConnection = computed(
   () => connections.value.find((row) => String(row.id) === providerChoice.value) ?? null,
 )
 
+/** Provider and model updates write overlapping settings columns, so the two pickers
+    disable together — concurrent PUTs could otherwise pair provider B with a model
+    picked from provider A's catalog. */
+const targetBusy = computed(() => providerPending.value || defaultsPending.value)
+
 /** Switching providers also clears the model/profile pair: it belonged to the old catalog. */
 async function applyProvider(value: string) {
   const previous = providerChoice.value
@@ -502,7 +507,7 @@ async function removePrompt() {
               <UiSelect
                 :id="id"
                 :model-value="providerChoice"
-                :disabled="providerPending"
+                :disabled="targetBusy"
                 @update:model-value="applyProvider"
               >
                 <option value="">{{ t('settings.providerOpenRouter') }}</option>
@@ -599,19 +604,21 @@ async function removePrompt() {
 
       <UiCard :title="t('settings.defaultsTitle')">
         <div class="section">
-          <!-- Model choice on a custom connection: its own live catalog, default prompts. -->
+          <!-- Model choice on a custom connection: its own live catalog, default prompts.
+               The error banner renders beside the last good catalog, never instead of it —
+               a failed refresh keeps its data (docs/web.md). -->
           <template v-if="selectedConnection">
             <UiBanner v-if="connectionModelsError" tone="error">
               {{ connectionModelsError }}
             </UiBanner>
-            <UiSkeleton v-else-if="connectionModelsPending && !connectionModels" :rows="2" />
+            <UiSkeleton v-if="connectionModelsPending && !connectionModels" :rows="2" />
 
-            <div v-else class="control-row">
+            <div v-if="connectionModels" class="control-row">
               <UiField v-slot="{ id }" class="grow" :label="t('settings.connectionModelLabel')">
                 <UiSelect
                   :id="id"
                   :model-value="connectionModelChoice"
-                  :disabled="defaultsPending"
+                  :disabled="targetBusy"
                   @update:model-value="applyConnectionModel"
                 >
                   <option value="">{{ t('common.notSet') }}</option>
@@ -641,7 +648,7 @@ async function removePrompt() {
                 <UiSelect
                   :id="id"
                   :model-value="selection"
-                  :disabled="defaultsPending"
+                  :disabled="targetBusy"
                   @update:model-value="applySelection"
                 >
                   <option value="">{{ t('common.notSet') }}</option>

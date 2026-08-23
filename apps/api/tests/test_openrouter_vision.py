@@ -150,7 +150,8 @@ async def test_an_openai_connection_calls_its_own_endpoint_without_the_usage_fla
             200,
             json={
                 "choices": [{"message": {"content": "# Page"}}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                # A claimed cost from an arbitrary proxy must be ignored, not billed.
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": "9.990000"},
             },
         )
     )
@@ -165,3 +166,18 @@ async def test_an_openai_connection_calls_its_own_endpoint_without_the_usage_fla
     sent = json.loads(route.calls[0].request.content)
     assert "usage" not in sent
     assert route.calls[0].request.headers["authorization"] == "Bearer sk-kano-proxy-test"
+
+
+@respx.mock
+async def test_an_oversized_completion_fails_the_call(key, documents) -> None:
+    """The response body cap applies to vision completions too (docs/parsing.md)."""
+    respx.post(CHAT_URL).mock(
+        return_value=httpx.Response(
+            200, content=b"x" * 1024, headers={"content-type": "application/json"}
+        )
+    )
+
+    with pytest.raises(UpstreamError):
+        await transcribe_page(
+            key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1, max_response_bytes=64
+        )
