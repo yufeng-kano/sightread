@@ -2,7 +2,6 @@
 definePageMeta({ middleware: 'authed' })
 
 const { t } = useI18n()
-useHead(() => ({ title: t('connect.headTitle') }))
 
 // The connector URL is this deployment's own origin; Caddy routes /mcp to the API.
 const mcpUrl = ref('https://<host>/mcp')

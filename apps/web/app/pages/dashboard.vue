@@ -9,7 +9,6 @@ definePageMeta({ middleware: 'authed' })
 const USAGE_DAYS = 30
 
 const { t, locale } = useI18n()
-useHead(() => ({ title: t('dashboard.headTitle') }))
 
 const { data, pending, errorMessage, refresh } = useAuthedData(() => getUsage(USAGE_DAYS))
 const summary = computed(() => (data.value ? summarizeUsage(data.value) : null))

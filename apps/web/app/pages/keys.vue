@@ -6,7 +6,6 @@ import type { TableColumn } from '~/lib/table'
 definePageMeta({ middleware: 'authed' })
 
 const { t, locale } = useI18n()
-useHead(() => ({ title: t('keys.headTitle') }))
 
 const { data, pending, errorMessage, refresh } = useAuthedData(() => listKeys())
 const { resolve } = useApiError()

@@ -123,7 +123,6 @@ export default {
       'An OpenAI-compatible Chat Completions base URL. The key is validated against its /models before saving.',
     connectionKeyLabel: 'API key',
     connectionKeyKeepNote: 'Leave blank to keep the stored key.',
-    connectionState: '{url} · key {masked} · {model}',
     connectionSaved: 'Connection validated and saved.',
     connectionDelete: 'Delete connection',
     connectionDeleteConfirm:
