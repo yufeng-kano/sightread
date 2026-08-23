@@ -22,8 +22,10 @@ const props = withDefaults(
     /** Destinations this item may not enter. */
     forbidden?: Set<number>
     pending?: boolean
+    /** Why the last attempt failed — inside the dialog, which is where it happened. */
+    error?: string | null
   }>(),
-  { forbidden: () => new Set<number>() },
+  { forbidden: () => new Set<number>(), error: null },
 )
 
 const emit = defineEmits<{ move: [FolderId]; cancel: [] }>()
@@ -56,6 +58,8 @@ const canMove = computed(
       <h2 class="title">{{ t('files.moveTitle') }}</h2>
       <p class="subject">{{ name }}</p>
     </template>
+
+    <UiBanner v-if="error" class="failure" tone="error">{{ error }}</UiBanner>
 
     <div class="picker">
       <FolderTree
@@ -97,6 +101,10 @@ const canMove = computed(
   white-space: nowrap;
   color: var(--faint);
   font-size: var(--text-xs);
+}
+
+.failure {
+  margin-bottom: var(--space-4);
 }
 
 /* Bounded and scrolling: a deep tree must not push the dialog's buttons off the screen. */

@@ -35,6 +35,8 @@ Responses:
 
 The upload is hashed (SHA-256) while streaming to disk; the request must never buffer the whole file in memory.
 
+The multipart body is read through a **bounded stream** rather than Starlette's `request.form()`, on this route and on the library's. The parser spools each file part to disk as it arrives with no cap of its own, and `store_upload` — where `UPLOAD_MAX_BYTES` is really enforced — only sees the file once the whole body is parsed. A request that declares no length, or an untrue one, would otherwise be written out in full before anything could answer 413.
+
 ### GET /v1/jobs/{id} — status
 
 `{ job_id, status: queued|running|succeeded|failed, page_count, pages_done, error?, created_at, finished_at? }`
@@ -97,7 +99,7 @@ Preset profiles (id, name, model, bbox_format, description).
 | `GET /api/jobs?limit=50` | recent jobs (history): `job_id`, `kind`, `filename`, `status`, `model`, `profile`, `page_count`, `pages_done`, `error`, timestamps — no per-job cost (usage is aggregated per day/model only); `GET /api/jobs/{id}/result` same payload as data plane |
 | `GET /api/library` | the whole file library in one read: `{folders: [...], documents: [...]}`. A document carries its own fields (`id`, `folder_id`, `name`, `job_id`) plus the parse's live state (`status`, `kind`, `model`, `page_count`, `pages_done`, `size_bytes`, `error`, `created_at`, `finished_at`) — the browser needs no second request to render a row or its progress |
 | `POST /api/library/folders`, `PUT/DELETE /api/library/folders/{id}` | create (`name`, optional `parent_id`) / rename **and** move (partial: only the fields present change) / delete. Deleting cascades to the subtree; a `parent_id` inside the folder's own subtree is refused (a directory cannot contain itself). A name that is already taken is suffixed ` (2)` on create and on move, and answers 409 on a rename |
-| `POST /api/library/documents` | **the web upload.** Multipart `file` + optional `folder_id`, streamed to disk by the same `jobs.intake` sequence `/v1/parse` runs, then a document row naming the job. 201 with the document; a dedup hit points at the cached job and is already `succeeded` |
+| `POST /api/library/documents` | **the web upload.** Multipart `file` + optional `folder_id`, streamed to disk by the same `jobs.intake` sequence `/v1/parse` runs, then a document row naming the job. 201 with the document; a dedup hit points at the cached job and is already `succeeded`, and a retry of an upload that already landed points at the job still running for it rather than starting a second parse ([jobs.md](./jobs.md) § Dedup) |
 | `PUT/DELETE /api/library/documents/{id}` | rename / move (`name`, `folder_id`) / delete the library entry. Deleting removes the entry, never the job or its result ([database.md](./database.md) § Rules) |
 | `GET /api/library/documents/{id}/result` | the document's result, same payload as the data plane's `/result` |
 

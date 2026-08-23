@@ -383,6 +383,10 @@ const renameValue = ref('')
 const moving = ref<Row | null>(null)
 const deleting = ref<Row | null>(null)
 const busy = ref(false)
+/** A dialog owns the page's error while it is open — see the banner in each of them. */
+const dialogOpen = computed(
+  () => showNewFolder.value || !!renaming.value || !!moving.value || !!deleting.value,
+)
 
 function rowName(row: Row): string {
   if (row.kind === 'folder') return row.folder.name
@@ -690,6 +694,21 @@ function dropOn(target: FolderId, event: DragEvent) {
  * dropped on the list go to the folder that is open — that is what the overlay says, and
  * it covers the rows while it is up.
  */
+/**
+ * A drop on a folder row or a breadcrumb. Files are not theirs to take: the overlay names
+ * the open folder while a file drag is up, and a row quietly landing them somewhere else
+ * would make the page lie about where a document went. Letting the event through puts them
+ * where the overlay said.
+ */
+function onTargetDrop(target: FolderId, event: DragEvent) {
+  if (carriesFiles(event.dataTransfer)) {
+    return
+  }
+  event.preventDefault()
+  event.stopPropagation()
+  dropOn(target, event)
+}
+
 function onTargetDragOver(event: DragEvent, target: FolderId) {
   if (carriesFiles(event.dataTransfer) || !canMoveInto(dragItem.value, target)) {
     return
@@ -735,12 +754,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
     ...base,
     class: { 'drop-target': dropTarget.value === row.folder.id },
     onDragover: (event: DragEvent) => onTargetDragOver(event, row.folder.id),
-    onDrop: (event: DragEvent) => {
-      event.preventDefault()
-      // The list underneath would otherwise treat this as a drop on the open folder.
-      event.stopPropagation()
-      dropOn(row.folder.id, event)
-    },
+    onDrop: (event: DragEvent) => onTargetDrop(row.folder.id, event),
   }
 }
 </script>
@@ -805,7 +819,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
                 :aria-current="!crumbs.length ? 'page' : undefined"
                 @click="openFolder(null)"
                 @dragover="onTargetDragOver($event, null)"
-                @drop.prevent.stop="dropOn(null, $event)"
+                @drop="onTargetDrop(null, $event)"
               >
                 {{ t('files.root') }}
               </button>
@@ -818,7 +832,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
                   :aria-current="index === crumbs.length - 1 ? 'page' : undefined"
                   @click="openFolder(crumb.id)"
                   @dragover="onTargetDragOver($event, crumb.id)"
-                  @drop.prevent.stop="dropOn(crumb.id, $event)"
+                  @drop="onTargetDrop(crumb.id, $event)"
                 >
                   {{ crumb.name }}
                 </button>
@@ -841,7 +855,9 @@ function rowAttrs(row: Row): Record<string, unknown> {
           </template>
 
           <UiBanner v-if="errorMessage" class="state" tone="error">{{ errorMessage }}</UiBanner>
-          <UiBanner v-if="mutationError" class="state" tone="error">
+          <!-- Only when no dialog is open: a dialog reports its own failure inside
+               itself, where the button that failed is. -->
+          <UiBanner v-if="mutationError && !dialogOpen" class="state" tone="error">
             {{ mutationError }}
             <template #actions>
               <UiButton variant="ghost" size="xs" @click="mutationError = null">
@@ -1018,6 +1034,9 @@ function rowAttrs(row: Row): Record<string, unknown> {
         <UiField v-slot="{ id }" :label="t('files.nameLabel')">
           <UiTextInput :id="id" v-model="newFolderName" :maxlength="255" required />
         </UiField>
+        <UiBanner v-if="mutationError" class="dialog-error" tone="error">
+          {{ mutationError }}
+        </UiBanner>
       </form>
       <template #footer>
         <UiButton variant="ghost" :disabled="busy" @click="showNewFolder = false">
@@ -1044,6 +1063,9 @@ function rowAttrs(row: Row): Record<string, unknown> {
         <UiField v-slot="{ id }" :label="t('files.nameLabel')">
           <UiTextInput :id="id" v-model="renameValue" :maxlength="512" required />
         </UiField>
+        <UiBanner v-if="mutationError" class="dialog-error" tone="error">
+          {{ mutationError }}
+        </UiBanner>
       </form>
       <template #footer>
         <UiButton variant="ghost" :disabled="busy" @click="renaming = null">
@@ -1068,6 +1090,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
       :current="movingFrom"
       :forbidden="forbiddenTargets"
       :pending="busy"
+      :error="mutationError"
       @move="submitMove"
       @cancel="moving = null"
     />
@@ -1082,6 +1105,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
       "
       :confirm-label="t('common.delete')"
       :pending="busy"
+      :error="mutationError"
       @confirm="confirmDelete"
       @cancel="deleting = null"
     />
@@ -1116,6 +1140,10 @@ function rowAttrs(row: Row): Record<string, unknown> {
 }
 
 .state {
+  margin-top: var(--space-4);
+}
+
+.dialog-error {
   margin-top: var(--space-4);
 }
 

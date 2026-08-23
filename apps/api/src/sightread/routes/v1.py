@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from ..auth.deps import (
     AppSettings,
@@ -27,9 +28,11 @@ from ..db.models import Job, Result, User
 from ..errors import ApiError
 from ..jobs import events
 from ..jobs.intake import (
+    MULTIPART_ENVELOPE_BYTES,
     PDF_MEDIA_TYPE,
     base64_chunks,
     cached_payload,
+    capped_stream,
     submit_parse,
     upload_chunks,
 )
@@ -137,7 +140,20 @@ async def parse(request: Request, caller: UploaderCaller, db: DbSession, setting
         raise ApiError(413, "invalid_request", "The upload exceeds UPLOAD_MAX_BYTES")
 
     if content_type.startswith("multipart/form-data"):
-        form = await request.form()
+        # A bounded stream, not `request.form()`'s: the parser spools each file part to
+        # disk as it arrives, so a request that declares no length would otherwise be
+        # written out in full before `store_upload` could refuse it.
+        try:
+            form = await MultiPartParser(
+                request.headers,
+                capped_stream(
+                    request.stream(), settings.upload_max_bytes + MULTIPART_ENVELOPE_BYTES
+                ),
+            ).parse()
+        except MultiPartException as exc:
+            raise ApiError(
+                400, "invalid_request", "The multipart body could not be read"
+            ) from exc
         upload = form.get("file")
         if not isinstance(upload, UploadFile):
             raise ApiError(400, "invalid_request", "Multipart requests need a 'file' part")

@@ -21,11 +21,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, delete, select
 from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import FormData, UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from ..auth.deps import AppSettings, CsrfGuard, DbSession, SessionUser
 from ..db.models import Document, Folder, Job, Result
 from ..errors import ApiError
-from ..jobs.intake import submit_parse, upload_chunks
+from ..jobs.intake import (
+    MULTIPART_ENVELOPE_BYTES,
+    capped_stream,
+    submit_parse,
+    upload_chunks,
+)
 from ..jobs.runner import result_payload
 
 router = APIRouter(prefix="/api/library", tags=["library"])
@@ -192,13 +198,26 @@ async def insert_named[RowT: (Folder, Document)](
                 raise ApiError(409, "invalid_request", message) from exc
 
 
-async def commit_or_conflict(db: DbSession, message: str) -> None:
-    """Commit, mapping a lost name race to the same 409 the pre-check would have given."""
+async def commit_or_retry(db: DbSession, retries_left: int, message: str) -> bool:
+    """Commit; answer False when a lost name race means the caller should choose again.
+
+    A rename passes `0`: the name is what the user just typed, so a collision is theirs to
+    resolve. A move passes what is left of its attempts, because a collision there is
+    resolved with a suffix rather than refused (docs/web.md § Files).
+    """
     try:
         await db.commit()
+        return True
     except IntegrityError as exc:
         await db.rollback()
-        raise ApiError(409, "invalid_request", message) from exc
+        if retries_left <= 0:
+            raise ApiError(409, "invalid_request", message) from exc
+        return False
+
+
+async def folder_exists(db: DbSession, user_id: int, folder_id: int) -> bool:
+    query = select(Folder.id).where(Folder.id == folder_id, Folder.user_id == user_id)
+    return (await db.execute(query)).first() is not None
 
 
 # --- payloads ---------------------------------------------------------------------------
@@ -247,14 +266,23 @@ async def job_of(db: DbSession, job_id: uuid.UUID) -> Job:
 # --- read ---------------------------------------------------------------------------------
 
 
+async def read_folders(db: DbSession, user_id: int):
+    query = select(Folder).where(Folder.user_id == user_id).order_by(Folder.name)
+    return (await db.execute(query)).scalars().all()
+
+
 @router.get("")
 async def read_library(user: SessionUser, db: DbSession):
-    """The whole library in one read — navigation between folders is then local."""
-    folders = (
-        (await db.execute(select(Folder).where(Folder.user_id == user.id).order_by(Folder.name)))
-        .scalars()
-        .all()
-    )
+    """The whole library in one read — navigation between folders is then local.
+
+    Two statements under READ COMMITTED see two snapshots, so a folder created between
+    them arrives after the documents that moved into it: the client would hold documents
+    whose folder it has never heard of and draw them nowhere. Re-reading the folders when
+    that happens costs one query in a race that is otherwise invisible, and converges — a
+    folder a live document points at cannot have been deleted, since deleting one takes
+    its documents with it.
+    """
+    folders = await read_folders(db, user.id)
     documents = (
         await db.execute(
             select(Document, Job)
@@ -263,6 +291,11 @@ async def read_library(user: SessionUser, db: DbSession):
             .order_by(Document.created_at.desc())
         )
     ).all()
+
+    known = {row.id for row in folders}
+    if any(row.folder_id is not None and row.folder_id not in known for row, _ in documents):
+        folders = await read_folders(db, user.id)
+
     return {
         "folders": [folder_payload(row) for row in folders],
         "documents": [document_payload(row, job) for row, job in documents],
@@ -308,24 +341,31 @@ async def update_folder(folder_id: int, body: FolderUpdate, user: SessionUser, d
     turning it into "Invoices (2)" would be a lie. A move that collides is suffixed, the
     way dropping a file into a folder that already holds one behaves.
     """
-    row = await owned_folder(db, user.id, folder_id)
     provided = body.model_fields_set
-    parent_id = body.parent_id if "parent_id" in provided else row.parent_id
-
-    if parent_id != row.parent_id and parent_id is not None:
-        await owned_folder(db, user.id, parent_id)
-        if parent_id in await subtree_ids(db, user.id, row.id, for_update=True):
-            raise ApiError(400, "invalid_request", "A folder cannot be moved inside itself")
-
     renaming = "name" in provided and body.name is not None
-    wanted = clean_name(body.name, FOLDER_NAME_MAX) if renaming else row.name
-    taken = await folder_names(db, user.id, parent_id, exclude_id=row.id)
-    if renaming and wanted in taken:
-        raise ApiError(409, "invalid_request", "A folder with this name already exists here")
+    clash = "A folder with this name already exists here"
 
-    row.parent_id = parent_id
-    row.name = free_name(taken, wanted, FOLDER_NAME_MAX)
-    await commit_or_conflict(db, "A folder with this name already exists here")
+    # The whole decision sits inside the retry: a rollback releases the lock the move was
+    # validated under, so a second attempt has to establish both facts again.
+    for attempt in range(INSERT_ATTEMPTS):
+        row = await owned_folder(db, user.id, folder_id)
+        parent_id = body.parent_id if "parent_id" in provided else row.parent_id
+
+        if parent_id != row.parent_id and parent_id is not None:
+            await owned_folder(db, user.id, parent_id)
+            if parent_id in await subtree_ids(db, user.id, row.id, for_update=True):
+                raise ApiError(400, "invalid_request", "A folder cannot be moved inside itself")
+
+        wanted = clean_name(body.name, FOLDER_NAME_MAX) if renaming else row.name
+        taken = await folder_names(db, user.id, parent_id, exclude_id=row.id)
+        if renaming and wanted in taken:
+            raise ApiError(409, "invalid_request", clash)
+
+        row.parent_id = parent_id
+        row.name = free_name(taken, wanted, FOLDER_NAME_MAX)
+        retries = 0 if renaming else INSERT_ATTEMPTS - 1 - attempt
+        if await commit_or_retry(db, retries, clash):
+            break
     return folder_payload(row)
 
 
@@ -382,13 +422,24 @@ async def upload_document(
     """
     if not request.headers.get("content-type", "").startswith("multipart/form-data"):
         raise ApiError(400, "invalid_request", "The upload must be multipart/form-data")
-    # Cheap rejection before a byte is read; `store_upload` enforces the real cap while
-    # streaming, for a request that declares no length.
+    # Cheap rejection before a byte is read; the capped stream below is what stops a
+    # request that declares no length, or an untrue one.
     declared_length = request.headers.get("content-length", "")
     if declared_length.isdigit() and int(declared_length) > settings.upload_max_bytes * 2:
         raise ApiError(413, "invalid_request", "The upload exceeds UPLOAD_MAX_BYTES")
 
-    form = await request.form()
+    # The parser reads a bounded stream rather than the unbounded one `request.form()`
+    # hands it: it spools every file part to disk as that part arrives, so without this a
+    # chunked request could fill the upload directory long before `store_upload` sees a
+    # byte of it.
+    try:
+        form = await MultiPartParser(
+            request.headers,
+            capped_stream(request.stream(), settings.upload_max_bytes + MULTIPART_ENVELOPE_BYTES),
+        ).parse()
+    except MultiPartException as exc:
+        raise ApiError(400, "invalid_request", "The multipart body could not be read") from exc
+
     upload = form.get("file")
     if not isinstance(upload, UploadFile):
         raise ApiError(400, "invalid_request", "Multipart requests need a 'file' part")
@@ -404,42 +455,69 @@ async def upload_document(
         chunks=upload_chunks(upload),
         media_type=upload.content_type or "",
         filename=filename,
+        # The browser cannot tell a lost response from a lost request, so its retry of an
+        # upload that in fact landed must not buy a second parse (docs/jobs.md § Dedup).
+        reuse_in_flight=True,
     )
     # A dedup hit is a finished parse rather than a new one, so the file points at the job
     # that already produced it (docs/jobs.md § Dedup).
     job_id = submission.job.id if submission.job is not None else submission.cached.job_id
 
+    # The folder can be deleted while the document is being stored and probed. The parse is
+    # committed and will bill by now, so the file lands at the root rather than being lost
+    # behind a foreign-key failure dressed up as a name conflict.
+    if folder_id is not None and not await folder_exists(db, user.id, folder_id):
+        folder_id = None
+
     # The job is committed and running by now, so the file has to land: `insert_named`
     # re-reads and retries rather than answering a conflict.
-    row = await insert_named(
-        db,
-        build=lambda name: Document(user_id=user.id, folder_id=folder_id, job_id=job_id, name=name),
-        taken=lambda: document_names(db, user.id, folder_id),
-        wanted=clean_name(filename, DOCUMENT_NAME_MAX),
-        limit=DOCUMENT_NAME_MAX,
-        message="A file with this name already exists here",
-    )
+    async def land(place: int | None) -> Document:
+        return await insert_named(
+            db,
+            build=lambda name: Document(user_id=user.id, folder_id=place, job_id=job_id, name=name),
+            taken=lambda: document_names(db, user.id, place),
+            wanted=clean_name(filename, DOCUMENT_NAME_MAX),
+            limit=DOCUMENT_NAME_MAX,
+            message="A file with this name already exists here",
+        )
+
+    try:
+        row = await land(folder_id)
+    except ApiError:
+        # The remaining sliver of that same race: deleted between the check above and this
+        # insert, which arrives as a foreign-key failure rather than a name one.
+        if folder_id is None or await folder_exists(db, user.id, folder_id):
+            raise
+        row = await land(None)
+
     return document_payload(row, await job_of(db, job_id))
 
 
 @router.put("/documents/{document_id}", dependencies=[CsrfGuard])
 async def update_document(document_id: int, body: DocumentUpdate, user: SessionUser, db: DbSession):
     """Rename and/or move a file. Same rule as a folder: rename refuses, move suffixes."""
-    row = await owned_document(db, user.id, document_id)
     provided = body.model_fields_set
-    folder_id = body.folder_id if "folder_id" in provided else row.folder_id
-    if folder_id != row.folder_id and folder_id is not None:
-        await owned_folder(db, user.id, folder_id)
-
     renaming = "name" in provided and body.name is not None
-    wanted = clean_name(body.name, DOCUMENT_NAME_MAX) if renaming else row.name
-    taken = await document_names(db, user.id, folder_id, exclude_id=row.id)
-    if renaming and wanted in taken:
-        raise ApiError(409, "invalid_request", "A file with this name already exists here")
+    clash = "A file with this name already exists here"
 
-    row.folder_id = folder_id
-    row.name = free_name(taken, wanted, DOCUMENT_NAME_MAX)
-    await commit_or_conflict(db, "A file with this name already exists here")
+    for attempt in range(INSERT_ATTEMPTS):
+        row = await owned_document(db, user.id, document_id)
+        folder_id = body.folder_id if "folder_id" in provided else row.folder_id
+        if folder_id != row.folder_id and folder_id is not None:
+            await owned_folder(db, user.id, folder_id)
+
+        wanted = clean_name(body.name, DOCUMENT_NAME_MAX) if renaming else row.name
+        taken = await document_names(db, user.id, folder_id, exclude_id=row.id)
+        if renaming and wanted in taken:
+            raise ApiError(409, "invalid_request", clash)
+
+        row.folder_id = folder_id
+        row.name = free_name(taken, wanted, DOCUMENT_NAME_MAX)
+        # Two tabs moving same-named files into one folder is the same race a create
+        # loses, and it has the same answer: take the next name, not a conflict.
+        retries = 0 if renaming else INSERT_ATTEMPTS - 1 - attempt
+        if await commit_or_retry(db, retries, clash):
+            break
     return document_payload(row, await job_of(db, row.job_id))
 
 

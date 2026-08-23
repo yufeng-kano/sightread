@@ -51,6 +51,13 @@ function focusables(): HTMLElement[] {
   )
 }
 
+/**
+ * Bound on the document rather than on the overlay, because focus does not reliably stay
+ * inside a dialog: a control that goes `loading` disables itself, and a disabled element
+ * hands focus back to `<body>`. A key pressed there never reaches a listener on the
+ * overlay, so a dialog whose action failed could not be closed with Escape and Tab
+ * restarted from the top of the page behind it.
+ */
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     event.stopPropagation()
@@ -72,17 +79,19 @@ function onKeydown(event: KeyboardEvent) {
   const first = items[0]!
   const last = items[items.length - 1]!
   const active = document.activeElement
+  const outside = !panel.value?.contains(active)
 
-  if (event.shiftKey && (active === first || active === panel.value)) {
+  if (event.shiftKey && (active === first || active === panel.value || outside)) {
     event.preventDefault()
     last.focus()
-  } else if (!event.shiftKey && active === last) {
+  } else if (!event.shiftKey && (active === last || outside)) {
     event.preventDefault()
     first.focus()
   }
 }
 
 onMounted(async () => {
+  document.addEventListener('keydown', onKeydown)
   previouslyFocused = document.activeElement as HTMLElement | null
   await nextTick()
   // The first field if there is one, else the panel — never the close button, which would
@@ -91,12 +100,15 @@ onMounted(async () => {
   target?.focus()
 })
 
-onBeforeUnmount(() => previouslyFocused?.focus?.())
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', onKeydown)
+  previouslyFocused?.focus?.()
+})
 </script>
 
 <template>
   <Teleport to="body">
-    <div class="overlay" @click.self="emit('close')" @keydown="onKeydown">
+    <div class="overlay" @click.self="emit('close')">
       <div
         ref="panel"
         class="panel"

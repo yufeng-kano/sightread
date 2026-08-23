@@ -8,6 +8,7 @@ safety).
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 
 import httpx
 import pytest
@@ -210,6 +211,71 @@ async def test_the_same_filename_twice_is_suffixed_before_the_extension(library,
     second = await _upload(library, documents)
     assert first.json()["name"] == "tiny.png"
     assert second.json()["name"] == "tiny (2).png"
+
+
+async def test_a_retried_upload_does_not_buy_a_second_parse(
+    library, sessionmaker, documents
+) -> None:
+    # The browser cannot tell a lost response from a lost request, so it retries an upload
+    # that may already have landed. The same bytes, still queued, must not become a second
+    # parse — that is the user's own key being spent twice for one document.
+    first = (await _upload(library, documents)).json()
+    second = (await _upload(library, documents)).json()
+
+    assert second["job_id"] == first["job_id"]
+    assert second["id"] != first["id"]
+    async with sessionmaker() as db:
+        assert len((await db.execute(select(Job))).scalars().all()) == 1
+
+
+async def test_a_body_past_the_cap_is_refused_while_it_streams(make_client, documents) -> None:
+    # No `Content-Length` to reject up front: the parser spools file parts to disk as they
+    # arrive, so the cap has to bite on the stream itself.
+    client = make_client(upload_max_bytes=1024)
+    await client.post("/api/auth/dev-login", headers=CSRF_HEADERS)
+    await client.put(
+        "/api/settings",
+        json={"default_model": MODEL, "default_profile": None},
+        headers=CSRF_HEADERS,
+    )
+
+    boundary = "sightreadtestboundary"
+
+    async def chunked():
+        yield (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="file"; filename="big.png"\r\n'
+            "Content-Type: image/png\r\n\r\n"
+        ).encode()
+        for _ in range(16):
+            yield b"x" * 16384
+        yield f"\r\n--{boundary}--\r\n".encode()
+
+    response = await client.post(
+        "/api/library/documents",
+        content=chunked(),
+        headers={**CSRF_HEADERS, "Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+
+    assert response.status_code == 413
+    upload_dir = Path(client.app.state.settings.upload_dir)
+    assert not upload_dir.exists() or list(upload_dir.iterdir()) == []
+
+
+async def test_moving_a_file_onto_a_taken_name_is_suffixed(library, documents) -> None:
+    folder = await _folder(library, "Invoices")
+    await _upload(library, documents, folder_id=folder["id"])
+    moving = (await _upload(library, documents)).json()
+
+    moved = await library.put(
+        f"/api/library/documents/{moving['id']}",
+        json={"folder_id": folder["id"]},
+        headers=CSRF_HEADERS,
+    )
+
+    assert moved.status_code == 200
+    assert moved.json()["folder_id"] == folder["id"]
+    assert moved.json()["name"] == "tiny (2).png"
 
 
 async def test_an_upload_without_a_configured_model_is_refused(client, documents) -> None:

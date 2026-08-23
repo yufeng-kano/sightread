@@ -32,6 +32,7 @@ from ..upstream.openrouter import fetch_image_models
 from .queue import (
     count_running_jobs,
     enqueue_job,
+    find_active_job,
     find_cached_job,
     normalize_pages_spec,
     parse_pages_spec,
@@ -41,6 +42,10 @@ from .runner import result_payload
 PDF_MEDIA_TYPE = "application/pdf"
 RETRY_AFTER_SECONDS = 30
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+# Room for the multipart envelope around a file at the cap: boundaries, part headers and
+# the other fields. The exact cap on the document itself stays in `store_upload`; this is
+# the coarse bound that stops a body being spooled to disk without limit.
+MULTIPART_ENVELOPE_BYTES = 64 * 1024
 # Base64 decodes in whole 4-character groups, so the slice length must stay a multiple of 4.
 BASE64_CHUNK_CHARS = 4 * 256 * 1024
 
@@ -67,6 +72,22 @@ class ChunkReader(Protocol):
 async def upload_chunks(upload: ChunkReader) -> AsyncIterator[bytes]:
     """Read a multipart upload in slices, so the document never sits in memory whole."""
     while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
+        yield chunk
+
+
+async def capped_stream(stream: AsyncIterator[bytes], max_bytes: int) -> AsyncIterator[bytes]:
+    """A request body that stops at a size, for the multipart parser to read.
+
+    The parser spools every file part to disk as it arrives with no cap of its own, and
+    `store_upload` only sees the file once the whole body has been parsed. A request that
+    declares no length — chunked, or simply lying — could therefore fill the upload
+    directory long before anything answered 413. This is where that request stops.
+    """
+    total = 0
+    async for chunk in stream:
+        total += len(chunk)
+        if total > max_bytes:
+            raise ApiError(413, "invalid_request", "The upload exceeds UPLOAD_MAX_BYTES")
         yield chunk
 
 
@@ -228,11 +249,17 @@ async def submit_parse(
     pages: str | None = None,
     force: bool = False,
     ticket: UploadTicket | None = None,
+    reuse_in_flight: bool = False,
 ) -> Submission:
     """Store the document, dedup it and queue the parse. Commits before it returns.
 
     An upload ticket is bound and spent by that same commit, so nothing rejected on the way
     here (413, 400, 429) costs the caller its one upload (docs/auth.md § 5).
+
+    `reuse_in_flight` additionally answers with a job that is still queued or running for
+    these exact bytes instead of starting a second one. Only the web library asks for it: a
+    browser cannot tell a lost response from a lost request, so its retry would otherwise
+    buy the user a second parse of a document they already paid for (docs/jobs.md § Dedup).
     """
     kind, media_type = resolve_kind(filename, media_type)
     target = await resolve_target(user, model, profile_id)
@@ -260,19 +287,20 @@ async def submit_parse(
         stored.unlink(missing_ok=True)
         raise ApiError(400, "invalid_request", str(exc)) from exc
 
+    key = {
+        "user_id": user.id,
+        "sha256": sha256,
+        "model": target.model,
+        "connection_id": target.connection_id,
+        "connection_base_url": target.connection_base_url,
+        "profile": target.profile,
+        "profile_version": target.profile_version,
+        "pages_spec": pages_spec,
+        "prompt_sha256": prompt_sha256,
+    }
+
     if not force:
-        cached = await find_cached_job(
-            db,
-            user_id=user.id,
-            sha256=sha256,
-            model=target.model,
-            connection_id=target.connection_id,
-            connection_base_url=target.connection_base_url,
-            profile=target.profile,
-            profile_version=target.profile_version,
-            pages_spec=pages_spec,
-            prompt_sha256=prompt_sha256,
-        )
+        cached = await find_cached_job(db, **key)
         result = (
             None
             if cached is None
@@ -291,6 +319,17 @@ async def submit_parse(
                 upload_tickets.spend(ticket, result.job_id)
                 await db.commit()
             return Submission(cached=result)
+
+        if reuse_in_flight:
+            active = await find_active_job(db, **key)
+            if active is not None:
+                # The same parse is already on its way. Starting another would spend the
+                # user's key twice over for one document.
+                stored.unlink(missing_ok=True)
+                if ticket is not None:
+                    upload_tickets.spend(ticket, active.id)
+                    await db.commit()
+                return Submission(job=active)
 
     job = await enqueue_job(
         db,
