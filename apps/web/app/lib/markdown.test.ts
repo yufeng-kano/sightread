@@ -170,3 +170,32 @@ describe('parseResultMarkdown tables', () => {
     ])
   })
 })
+
+describe('parseResultMarkdown table edge cases', () => {
+  it('leaves a formula that starts with a pipe as prose', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '|x| = 3', '|y| = 4', 'Both hold for every n.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([{ kind: 'p', text: '|x| = 3 |y| = 4 Both hold for every n.' }])
+  })
+
+  it('keeps an escaped pipe inside a cell instead of splitting on it', () => {
+    const pages = parseResultMarkdown(
+      [
+        '<!-- page: 1 -->',
+        '| Vendor | Region |',
+        '| --- | --- |',
+        '| ACME \\| Europe | EMEA |',
+      ].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      {
+        kind: 'table',
+        header: ['Vendor', 'Region'],
+        rows: [['ACME | Europe', 'EMEA']],
+      },
+    ])
+  })
+})

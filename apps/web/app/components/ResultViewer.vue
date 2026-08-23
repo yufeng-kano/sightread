@@ -299,12 +299,17 @@ const failedPages = computed(() => props.result?.errors ?? [])
 
 /* --- Tabs ----------------------------------------------------------------- */
 
+/*
+ * No `overflow: hidden` to round the children: the focus ring is an outline at a 2px
+ * offset, and a clipping ancestor eats most of it on a control that sits flush against the
+ * edge. The buttons carry the corners themselves instead — one pixel less than the border's
+ * radius, since the border sits outside them.
+ */
 .tabs {
   display: inline-flex;
   flex-shrink: 0;
   border: 1px solid var(--edge);
   border-radius: var(--radius);
-  overflow: hidden;
 }
 
 .tab {
@@ -319,6 +324,14 @@ const failedPages = computed(() => props.result?.errors ?? [])
   transition:
     background var(--duration-fast) var(--ease),
     color var(--duration-fast) var(--ease);
+}
+
+.tab:first-child {
+  border-radius: calc(var(--radius) - 1px) 0 0 calc(var(--radius) - 1px);
+}
+
+.tab:last-child {
+  border-radius: 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0;
 }
 
 .tab + .tab {

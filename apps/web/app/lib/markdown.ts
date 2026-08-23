@@ -65,7 +65,6 @@ function isOrdered(marker: string): boolean {
 function startsBlock(line: string, next = ''): boolean {
   return (
     !line ||
-    line.startsWith('|') ||
     isTableStart(line, next) ||
     line.startsWith('#') ||
     LIST_ITEM.test(line) ||
@@ -75,12 +74,17 @@ function startsBlock(line: string, next = ''): boolean {
   )
 }
 
+/**
+ * Splits on the pipes that separate columns, which is not every pipe: GFM escapes a literal
+ * one as `\|`, and splitting on that both invents a column and leaves the backslash on
+ * screen. The outer pipes are optional, so they are only trimmed when present.
+ */
 function splitRow(line: string): string[] {
   return line
     .replace(/^\s*\|/, '')
-    .replace(/\|\s*$/, '')
-    .split('|')
-    .map((cell) => cell.trim())
+    .replace(/(?<!\\)\|\s*$/, '')
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replace(/\\\|/g, '|'))
 }
 
 /**
@@ -172,7 +176,9 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       continue
     }
 
-    if (line.startsWith('|') || isTableStart(line, (lines[index + 1] ?? '').trim())) {
+    // `isTableStart` for both forms, with no shortcut for a leading pipe: the prompt asks
+    // for formulas, and `|x| = 3` is a line of maths, not a header-only table.
+    if (isTableStart(line, (lines[index + 1] ?? '').trim())) {
       const rows: string[][] = []
       let cursor = index
       while (cursor < lines.length) {

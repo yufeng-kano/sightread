@@ -451,7 +451,12 @@ const summaryModel = computed(() => {
   if (selection.value.startsWith('profile:')) {
     const id = selection.value.slice('profile:'.length)
     const profile = catalog.value?.profiles.find((entry) => entry.id === id)
-    return profile?.model ?? profile?.name ?? t('common.notSet')
+    if (profile) {
+      return profile.model ?? profile.name
+    }
+    // A stored profile the catalog has not described yet. "Not set" here would be the same
+    // fabrication as calling an unresolved provider OpenRouter: a choice *is* stored.
+    return t('common.loading')
   }
   return t('common.notSet')
 })
@@ -487,9 +492,18 @@ const selectedPrompt = computed(
   () => prompts.value.find((row) => String(row.id) === promptChoice.value) ?? null,
 )
 
-const summaryPrompt = computed(
-  () => selectedPrompt.value?.name ?? t('settings.promptDefaultOption'),
+/** Same rule again: a stored preset whose row has not arrived is unresolved, not the
+ *  default prompt. */
+const promptUnresolved = computed(
+  () => promptChoice.value !== '' && selectedPrompt.value === null,
 )
+
+const summaryPrompt = computed(() => {
+  if (promptUnresolved.value) {
+    return t('common.loading')
+  }
+  return selectedPrompt.value?.name ?? t('settings.promptDefaultOption')
+})
 
 async function applyPromptChoice(value: string) {
   const previous = promptChoice.value
