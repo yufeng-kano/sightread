@@ -20,8 +20,9 @@ export type ResultBlock =
   | { kind: 'h2'; text: string }
   | { kind: 'h3'; text: string }
   | { kind: 'p'; text: string }
-  | { kind: 'list'; ordered: boolean; items: string[] }
+  | { kind: 'list'; ordered: boolean; items: string[]; start?: number }
   | { kind: 'math'; text: string }
+  | { kind: 'code'; text: string; lang: string | null }
   | { kind: 'table'; header: string[]; rows: string[][] }
   | { kind: 'fig'; id: string; bbox: Bbox; caption: string | null }
 
@@ -40,6 +41,8 @@ const COMMENT = /^<!--.*-->$/
 const LIST_ITEM = /^([-*+]|\d{1,9}[.)])\s+(.*)$/
 /** A display-math fence: `$$` alone on its line. */
 const MATH_FENCE = '$$'
+/** A fenced code block's opening or closing line, with its optional info string. */
+const CODE_FENCE = /^(?:```|~~~)\s*([^\s`]*)\s*$/
 
 /** A pipe table's separator row: `| --- | :--: |`, with or without the outer pipes. */
 function isTableRule(line: string): boolean {
@@ -69,6 +72,7 @@ function startsBlock(line: string, next = ''): boolean {
   return (
     !line ||
     line === MATH_FENCE ||
+    CODE_FENCE.test(line) ||
     isTableStart(line, next) ||
     line.startsWith('#') ||
     LIST_ITEM.test(line) ||
@@ -149,6 +153,26 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       continue
     }
 
+    // Code, like math, is content whose line breaks and indentation are the point. The
+    // prompt tells the model not to wrap its *answer* in a fence, so a fence that does
+    // arrive is a code block the page carried.
+    const codeFence = CODE_FENCE.exec(line)
+    if (codeFence) {
+      const rows: string[] = []
+      let cursor = index + 1
+      while (
+        cursor < lines.length &&
+        !CODE_FENCE.test((lines[cursor] ?? '').trim()) &&
+        !PAGE_MARKER.test((lines[cursor] ?? '').trim())
+      ) {
+        rows.push((lines[cursor] ?? '').trimEnd())
+        cursor += 1
+      }
+      index = CODE_FENCE.test((lines[cursor] ?? '').trim()) ? cursor : cursor - 1
+      page().blocks.push({ kind: 'code', text: rows.join('\n'), lang: codeFence[1] || null })
+      continue
+    }
+
     // Display math is the one block whose line breaks *are* its content: an aligned group
     // of equations joined into a paragraph is no longer the formula the page carried, and
     // the prompt asks for formulas to be kept.
@@ -185,7 +209,11 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
     // markers the model was asked to produce.
     const listItem = LIST_ITEM.exec(line)
     if (listItem) {
-      const ordered = isOrdered(listItem[1] ?? '')
+      const marker = listItem[1] ?? ''
+      const ordered = isOrdered(marker)
+      // A list continued from the previous page starts at 5, not at 1, and renumbering it
+      // changes what the document says.
+      const start = ordered ? Number.parseInt(marker, 10) : Number.NaN
       const items: string[] = []
       let cursor = index
       while (cursor < lines.length) {
@@ -217,7 +245,12 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
         cursor += 1
       }
       index = cursor - 1
-      page().blocks.push({ kind: 'list', ordered, items })
+      page().blocks.push({
+        kind: 'list',
+        ordered,
+        items,
+        ...(Number.isFinite(start) && start !== 1 ? { start } : {}),
+      })
       continue
     }
 

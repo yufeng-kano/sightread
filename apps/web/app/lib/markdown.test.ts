@@ -243,3 +243,40 @@ describe('parseResultMarkdown formulas and wrapped items', () => {
     ])
   })
 })
+
+describe('parseResultMarkdown code and numbering', () => {
+  it('keeps a fenced code block whole, with its language', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'Example:', '```python', 'def f(x):', '    return x + 1', '```', 'Done.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'p', text: 'Example:' },
+      { kind: 'code', text: 'def f(x):\n    return x + 1', lang: 'python' },
+      { kind: 'p', text: 'Done.' },
+    ])
+  })
+
+  it('does not run an unclosed code fence past its page', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '```', 'x = 1', '<!-- page: 2 -->', 'Next page.'].join('\n'),
+    )
+
+    expect(pages).toHaveLength(2)
+    expect(pages[1]!.blocks).toEqual([{ kind: 'p', text: 'Next page.' }])
+  })
+
+  it('keeps the number an ordered list starts at', () => {
+    const pages = parseResultMarkdown(['<!-- page: 2 -->', '5. Fifth', '6. Sixth'].join('\n'))
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'list', ordered: true, items: ['Fifth', 'Sixth'], start: 5 },
+    ])
+  })
+
+  it('leaves a list starting at one without a start attribute', () => {
+    const pages = parseResultMarkdown(['<!-- page: 1 -->', '1. First'].join('\n'))
+
+    expect(pages[0]!.blocks).toEqual([{ kind: 'list', ordered: true, items: ['First'] }])
+  })
+})

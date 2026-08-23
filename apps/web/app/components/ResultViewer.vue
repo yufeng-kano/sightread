@@ -225,10 +225,16 @@ const failedPages = computed(() => props.result?.errors ?? [])
                 <!-- Whitespace preserved: the line breaks are the formula. -->
                 <pre v-else-if="block.kind === 'math'" class="md-math">{{ block.text }}</pre>
 
+                <pre
+                  v-else-if="block.kind === 'code'"
+                  class="md-math"
+                ><code :class="block.lang ? `language-${block.lang}` : undefined">{{ block.text }}</code></pre>
+
                 <component
                   :is="block.ordered ? 'ol' : 'ul'"
                   v-else-if="block.kind === 'list'"
                   class="md-list"
+                  :start="block.start"
                 >
                   <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
                 </component>
