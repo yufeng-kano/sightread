@@ -21,6 +21,7 @@ export type ResultBlock =
   | { kind: 'h3'; text: string }
   | { kind: 'p'; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
+  | { kind: 'math'; text: string }
   | { kind: 'table'; header: string[]; rows: string[][] }
   | { kind: 'fig'; id: string; bbox: Bbox; caption: string | null }
 
@@ -37,6 +38,8 @@ const HEADING = /^(#{1,6})\s+(.*)$/
 const COMMENT = /^<!--.*-->$/
 /** `- item`, `* item`, `+ item`, `1. item`, `2) item`. */
 const LIST_ITEM = /^([-*+]|\d{1,9}[.)])\s+(.*)$/
+/** A display-math fence: `$$` alone on its line. */
+const MATH_FENCE = '$$'
 
 /** A pipe table's separator row: `| --- | :--: |`, with or without the outer pipes. */
 function isTableRule(line: string): boolean {
@@ -65,6 +68,7 @@ function isOrdered(marker: string): boolean {
 function startsBlock(line: string, next = ''): boolean {
   return (
     !line ||
+    line === MATH_FENCE ||
     isTableStart(line, next) ||
     line.startsWith('#') ||
     LIST_ITEM.test(line) ||
@@ -145,6 +149,28 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       continue
     }
 
+    // Display math is the one block whose line breaks *are* its content: an aligned group
+    // of equations joined into a paragraph is no longer the formula the page carried, and
+    // the prompt asks for formulas to be kept.
+    if (line === MATH_FENCE) {
+      const rows: string[] = []
+      let cursor = index + 1
+      // A page marker closes an unclosed fence: a model that forgets the closing `$$` must
+      // not swallow the rest of the document into one formula.
+      while (
+        cursor < lines.length &&
+        (lines[cursor] ?? '').trim() !== MATH_FENCE &&
+        !PAGE_MARKER.test((lines[cursor] ?? '').trim())
+      ) {
+        rows.push((lines[cursor] ?? '').trimEnd())
+        cursor += 1
+      }
+      // Past the closing fence, or back onto the page marker so the next pass sees it.
+      index = (lines[cursor] ?? '').trim() === MATH_FENCE ? cursor : cursor - 1
+      page().blocks.push({ kind: 'math', text: rows.join('\n') })
+      continue
+    }
+
     const heading = HEADING.exec(line)
     if (heading) {
       page().blocks.push({
@@ -162,14 +188,33 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       const ordered = isOrdered(listItem[1] ?? '')
       const items: string[] = []
       let cursor = index
-      // One block per marker kind: a bulleted list directly under a numbered one is two
-      // lists, not one with a confused type.
-      for (; cursor < lines.length; cursor += 1) {
-        const match = LIST_ITEM.exec((lines[cursor] ?? '').trim())
-        if (!match || isOrdered(match[1] ?? '') !== ordered) {
+      while (cursor < lines.length) {
+        const raw = lines[cursor] ?? ''
+        const trimmed = raw.trim()
+
+        // One block per marker kind: a bulleted list directly under a numbered one is two
+        // lists, not one with a confused type.
+        const match = LIST_ITEM.exec(trimmed)
+        if (match) {
+          if (isOrdered(match[1] ?? '') !== ordered) {
+            break
+          }
+          items.push((match[2] ?? '').trim())
+          cursor += 1
+          continue
+        }
+
+        // An indented line that starts no block of its own is the rest of the item above
+        // it — a wrapped item is one item, not an item and a stray paragraph.
+        const continues =
+          items.length > 0 &&
+          /^\s+\S/.test(raw) &&
+          !startsBlock(trimmed, (lines[cursor + 1] ?? '').trim())
+        if (!continues) {
           break
         }
-        items.push((match[2] ?? '').trim())
+        items[items.length - 1] += ` ${trimmed}`
+        cursor += 1
       }
       index = cursor - 1
       page().blocks.push({ kind: 'list', ordered, items })

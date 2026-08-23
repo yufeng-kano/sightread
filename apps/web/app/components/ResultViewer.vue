@@ -222,6 +222,9 @@ const failedPages = computed(() => props.result?.errors ?? [])
                 <h4 v-else-if="block.kind === 'h3'" class="md-h3">{{ block.text }}</h4>
                 <p v-else-if="block.kind === 'p'" class="md-p">{{ block.text }}</p>
 
+                <!-- Whitespace preserved: the line breaks are the formula. -->
+                <pre v-else-if="block.kind === 'math'" class="md-math">{{ block.text }}</pre>
+
                 <component
                   :is="block.ordered ? 'ol' : 'ul'"
                   v-else-if="block.kind === 'list'"
@@ -475,6 +478,18 @@ const failedPages = computed(() => props.result?.errors ?? [])
   font-size: var(--text-base);
   line-height: 1.75;
   text-wrap: pretty;
+}
+
+/* A formula is read, not scanned, so it keeps the body's colour and size — but it scrolls
+   sideways rather than wrapping, because a re-wrapped equation is a different equation. */
+.md-math {
+  margin: 0;
+  overflow-x: auto;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  white-space: pre;
 }
 
 /* Markers stay outside the measure, so the text edge lines up with the paragraphs above

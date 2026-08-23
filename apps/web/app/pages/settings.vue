@@ -152,6 +152,24 @@ function openProviderEdit() {
   connectionModal.value = { mode: 'edit', id: row.id }
 }
 
+/**
+ * Closes the dialog and drops every draft it held — the key above all.
+ *
+ * The key-only mode edits the same `keyInput` the always-mounted API Key form below binds
+ * to, so a cancelled dialog would otherwise leave a typed credential sitting in a form the
+ * user can no longer see themselves having filled, one Save away from being submitted.
+ * Every close path goes through here: the button, the overlay, and Escape.
+ */
+function closeConnectionModal() {
+  connectionModal.value = null
+  connName.value = ''
+  connUrl.value = ''
+  connKey.value = ''
+  connError.value = null
+  keyInput.value = ''
+  keyError.value = null
+}
+
 async function submitConnection() {
   const modal = connectionModal.value
   if (!modal || connPending.value) {
@@ -160,9 +178,7 @@ async function submitConnection() {
   // The key-only mode writes the OpenRouter key, which has its own endpoint and its own
   // validation — it is the same dialog, not the same request.
   if (modal.mode === 'key') {
-    await saveOpenRouterKey(() => {
-      connectionModal.value = null
-    })
+    await saveOpenRouterKey(closeConnectionModal)
     return
   }
   connPending.value = true
@@ -174,7 +190,7 @@ async function submitConnection() {
         base_url: connUrl.value.trim(),
         api_key: connKey.value.trim(),
       })
-      connectionModal.value = null
+      closeConnectionModal()
       await refreshConnections()
       // A freshly added provider is what the user came to use — select it right away.
       await applyProvider(String(created.id))
@@ -184,7 +200,7 @@ async function submitConnection() {
         base_url: connUrl.value.trim(),
         ...(connKey.value.trim() ? { api_key: connKey.value.trim() } : {}),
       })
-      connectionModal.value = null
+      closeConnectionModal()
       await refreshConnections()
       connectionModels.value = null
       await loadConnectionModels()
@@ -931,7 +947,7 @@ async function removePrompt() {
             ? t('settings.connectionEditTitle')
             : t('settings.keyDialogTitle')
       "
-      @close="connectionModal = null"
+      @close="closeConnectionModal"
     >
       <form id="connection-form" class="modal-form" @submit.prevent="submitConnection">
         <template v-if="connectionModal.mode !== 'key'">
@@ -976,7 +992,7 @@ async function removePrompt() {
         <UiBanner v-if="connError" tone="error">{{ connError }}</UiBanner>
       </form>
       <template #footer>
-        <UiButton variant="ghost" :disabled="connPending || keyPending" @click="connectionModal = null">
+        <UiButton variant="ghost" :disabled="connPending || keyPending" @click="closeConnectionModal">
           {{ t('common.cancel') }}
         </UiButton>
         <UiButton

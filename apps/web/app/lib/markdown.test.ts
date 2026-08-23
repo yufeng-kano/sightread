@@ -199,3 +199,47 @@ describe('parseResultMarkdown table edge cases', () => {
     ])
   })
 })
+
+describe('parseResultMarkdown formulas and wrapped items', () => {
+  it('keeps the line breaks inside a display-math fence', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'Then:', '$$', '\\begin{aligned}', 'E &= mc^2', '\\end{aligned}', '$$', 'as shown.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'p', text: 'Then:' },
+      { kind: 'math', text: '\\begin{aligned}\nE &= mc^2\n\\end{aligned}' },
+      { kind: 'p', text: 'as shown.' },
+    ])
+  })
+
+  it('does not run an unclosed fence past its page', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '$$', 'E = mc^2', '<!-- page: 2 -->', 'Next page.'].join('\n'),
+    )
+
+    expect(pages).toHaveLength(2)
+    expect(pages[1]!.blocks).toEqual([{ kind: 'p', text: 'Next page.' }])
+  })
+
+  it('folds an indented continuation into the item above it', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '- First line', '  wrapped onto a second', '- Second'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'list', ordered: false, items: ['First line wrapped onto a second', 'Second'] },
+    ])
+  })
+
+  it('ends the list at an unindented line', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '- Only item', 'A new paragraph.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'list', ordered: false, items: ['Only item'] },
+      { kind: 'p', text: 'A new paragraph.' },
+    ])
+  })
+})
