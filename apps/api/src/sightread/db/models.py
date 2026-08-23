@@ -219,10 +219,12 @@ class Job(Base):
     profile_version: Mapped[int] = mapped_column(Integer, default=0)
     pipeline_version: Mapped[int] = mapped_column(Integer, default=0)
     bbox_format: Mapped[str] = mapped_column(String(32))
-    # The upstream this job runs on; NULL means OpenRouter (docs/api.md § Upstreams).
-    connection_id: Mapped[int | None] = mapped_column(
-        ForeignKey("provider_connections.id", ondelete="SET NULL"), nullable=True
-    )
+    # The upstream this job ran on; NULL means OpenRouter (docs/api.md § Upstreams).
+    # Deliberately NOT a foreign key: provider identity is immutable job history. A FK
+    # with SET NULL would relabel a deleted connection's jobs as OpenRouter jobs — a
+    # queued one would then bill the wrong key, and a succeeded one would satisfy
+    # OpenRouter dedup lookups with another upstream's output (docs/database.md).
+    connection_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # The effective prompt template, verbatim; its hash is part of the dedup key.
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_sha256: Mapped[str] = mapped_column(String(64), default="", server_default="")

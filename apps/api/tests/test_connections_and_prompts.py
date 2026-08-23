@@ -13,7 +13,7 @@ import respx
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from sightread.db.models import UsageLog
+from sightread.db.models import Job, UsageLog
 from sightread.errors import ApiError
 from sightread.jobs.queue import claim_next_job
 from sightread.jobs.runner import run_job
@@ -168,6 +168,13 @@ def test_base_url_rules_outside_local() -> None:
         "https://127.0.0.1/v1",
         "https://10.0.0.8/v1",
         "https://[::1]/v1",
+        # Non-canonical spellings the resolver accepts must be judged by the address
+        # they denote, not their text (shortened / decimal / hex / octal IPv4).
+        "https://127.1/v1",
+        "https://2130706433/v1",
+        "https://0x7f000001/v1",
+        "https://017700000001/v1",
+        "https://169.254.1.1/v1",
         "https://proxy.example/v1?x=1",
         "ftp://proxy.example/v1",
         "not a url",
@@ -176,6 +183,16 @@ def test_base_url_rules_outside_local() -> None:
             normalize_base_url(bad, "production")
     # Local development may point at a local endpoint over plain http.
     assert normalize_base_url("http://127.0.0.1:8787/openai/v1", "local") is not None
+
+
+def test_base_url_userinfo_is_refused_everywhere() -> None:
+    """`base_url` is stored and displayed in plaintext, so credentials must not ride
+    inside it — in any environment (docs/auth.md § 3)."""
+    for env in ("local", "production"):
+        with pytest.raises(ApiError):
+            normalize_base_url("https://user:password@proxy.example/v1", env)
+        with pytest.raises(ApiError):
+            normalize_base_url("https://token@proxy.example/v1", env)
 
 
 # --- prompt presets -------------------------------------------------------------------
@@ -304,6 +321,52 @@ async def test_parse_runs_on_the_default_connection(make_client, sessionmaker, d
     assert len(usage) == 1
     assert usage[0].prompt_tokens == 800
     assert usage[0].cost == 0
+
+
+@respx.mock
+async def test_deleting_a_connection_never_relabels_its_jobs_as_openrouter(
+    make_client, sessionmaker, documents
+) -> None:
+    """Provider identity is immutable job history: after the connection is deleted, the
+    job keeps its connection id (so it can never bill the OpenRouter key or answer an
+    OpenRouter dedup lookup) and fails with a reason that names the real problem."""
+    respx.get(MODELS_URL).mock(side_effect=_models_ok)
+
+    client = make_client()
+    assert (await client.post("/api/auth/dev-login", headers=CSRF_HEADERS)).status_code == 200
+    created = await _create_connection(client)
+    await client.put(
+        "/api/settings",
+        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        headers=CSRF_HEADERS,
+    )
+    key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
+    client.headers["Authorization"] = f"Bearer {key.json()['key']}"
+
+    accepted = await client.post(
+        "/v1/parse",
+        files={"file": ("tiny.png", documents["png"].read_bytes(), "image/png")},
+    )
+    assert accepted.status_code == 202, accepted.text
+    job_id = accepted.json()["job_id"]
+
+    assert (
+        await client.delete(f"/api/connections/{created['id']}", headers=CSRF_HEADERS)
+    ).status_code == 204
+
+    async with sessionmaker() as db:
+        job = (await db.execute(select(Job).where(Job.id == uuid.UUID(job_id)))).scalar_one()
+        assert job.connection_id == created["id"]
+
+    settings = client.app.state.settings
+    async with sessionmaker() as db:
+        claimed = await claim_next_job(db, settings.max_jobs_per_user)
+    assert str(claimed) == job_id
+    await run_job(sessionmaker, settings, claimed, asyncio.Semaphore(2))
+
+    status = (await client.get(f"/v1/jobs/{job_id}")).json()
+    assert status["status"] == "failed"
+    assert status["error"] == "the provider connection for this job no longer exists"
 
 
 @respx.mock

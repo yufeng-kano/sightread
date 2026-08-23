@@ -29,7 +29,9 @@ user_settings    user_id PK/FK, default_model, default_profile,
 jobs             id UUID PK, user_id FK, kind pdf|image, filename, media_type,
                  size_bytes, sha256, pages_spec, model, profile, profile_version,
                  pipeline_version, bbox_format,
-                 connection_id FK NULL,           -- provider connection; NULL = OpenRouter
+                 connection_id NULL,              -- provider connection; NULL = OpenRouter.
+                                                  -- deliberately NO FK: immutable history
+                                                  -- (see Rules)
                  prompt TEXT NULL,                -- effective prompt template, verbatim
                  prompt_sha256,                   -- its hash; part of the dedup key
                  status queued|running|succeeded|failed, error,
@@ -62,7 +64,7 @@ oauth_grants     id PK, client_id FK, user_id FK, kind code|access|refresh,
 
 - All credentials at rest follow [auth.md](./auth.md): hashes for anything we only verify, AES-GCM ciphertext for what we must replay upstream (the OpenRouter key and every provider connection's key). No plaintext secrets in any column.
 - `user_settings.system_prompt` no longer exists: the migration turned each stored custom prompt into a `prompt_presets` row named "Custom prompt" and pointed `prompt_preset_id` at it, so behavior did not change for anyone.
-- Deleting a provider connection SET-NULLs `jobs.connection_id` on its old jobs; a later OpenRouter job with the same model id, prompt and bytes may then hit those rows in the dedup cache. Accepted: the key already includes the model id and the exact prompt, so the replayed result is the same parse.
+- `jobs.connection_id` carries **no foreign key** on purpose: the upstream a job ran on is immutable history. A FK with SET NULL would relabel a deleted connection's jobs as OpenRouter jobs — a still-queued one would then run against OpenRouter billing the wrong key, and a succeeded one would answer OpenRouter dedup lookups with another upstream's output; RESTRICT would make a connection undeletable once any job exists. Instead the id simply outlives the row: the worker fails a queued job whose connection is gone ("the provider connection for this job no longer exists"), and dedup keys keep matching only their own upstream (connection ids are never reused).
 - `results` holds parsed **output** (kept indefinitely); `jobs.source_path` points at a temp file that is deleted at terminal state — the DB never stores document bytes.
 - Job claiming and per-user caps: exact queries in [jobs.md](./jobs.md).
 - Timestamps are `timestamptz`, UTC.

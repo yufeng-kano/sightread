@@ -182,14 +182,24 @@ async function loadConnectionModels() {
     connectionModels.value = null
     return
   }
+  const requestedId = row.id
   connectionModelsPending.value = true
   connectionModelsError.value = null
   try {
-    connectionModels.value = (await listConnectionModels(row.id)).data
+    const data = (await listConnectionModels(requestedId)).data
+    // A slow answer for a connection that is no longer selected must not fill the
+    // current picker with the wrong catalog — drop it.
+    if (selectedConnection.value?.id === requestedId) {
+      connectionModels.value = data
+    }
   } catch (error) {
-    connectionModelsError.value = await resolve(error)
+    if (selectedConnection.value?.id === requestedId) {
+      connectionModelsError.value = await resolve(error)
+    }
   } finally {
-    connectionModelsPending.value = false
+    if (selectedConnection.value?.id === requestedId) {
+      connectionModelsPending.value = false
+    }
   }
 }
 

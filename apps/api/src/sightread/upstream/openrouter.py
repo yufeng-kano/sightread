@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import re
+import socket
 import time
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -101,12 +102,31 @@ async def fetch_image_models(now: float | None = None) -> list[dict]:
 # --- provider connections (user-defined OpenAI-compatible endpoints) ------------------
 
 
+def _literal_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The IP a host literal denotes, canonicalizing the forms the resolver accepts.
+
+    `ipaddress` only parses canonical text, but the system resolver also takes the
+    shortened/decimal/hex IPv4 spellings (`127.1`, `2130706433`, `0x7f000001`) — exactly
+    what an SSRF probe would use. `inet_aton` speaks the resolver's dialect, so anything
+    it accepts is judged by the address it denotes, not the spelling.
+    """
+    try:
+        return ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+    except OSError:
+        return None
+
+
 def normalize_base_url(raw: str, app_env: str) -> str:
     """Validate and canonicalize a connection's base URL (docs/auth.md § 3).
 
     The app fetches this URL server-side, so outside local it must be https and must not
-    point at loopback/link-local/private literals — a hosted deployment must not be usable
-    as a probe into its own network.
+    denote a loopback/link-local/private address — a hosted deployment must not be usable
+    as a probe into its own network. Userinfo is refused everywhere: `base_url` is stored
+    and displayed in plaintext, so credentials must never ride inside it.
     """
     candidate = raw.strip().rstrip("/")
     parts = urlsplit(candidate)
@@ -114,21 +134,21 @@ def normalize_base_url(raw: str, app_env: str) -> str:
         raise ApiError(400, "invalid_request", "base_url must be an http(s) URL")
     if parts.query or parts.fragment:
         raise ApiError(400, "invalid_request", "base_url must not carry a query or fragment")
+    if parts.username or parts.password:
+        raise ApiError(
+            400,
+            "invalid_request",
+            "base_url must not contain credentials — the key is stored separately",
+        )
     if app_env != "local":
         if parts.scheme != "https":
             raise ApiError(400, "invalid_request", "base_url must use https")
         host = parts.hostname
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            address = None
+        address = _literal_ip(host)
         if (
             host == "localhost"
             or host.endswith(".localhost")
-            or (
-                address is not None
-                and (address.is_loopback or address.is_private or address.is_link_local)
-            )
+            or (address is not None and not address.is_global)
         ):
             raise ApiError(400, "invalid_request", "base_url must be a public endpoint")
     return candidate

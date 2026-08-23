@@ -104,15 +104,11 @@ def upgrade() -> None:
     )
     op.drop_column("user_settings", "system_prompt")
 
-    op.add_column(
-        "jobs",
-        sa.Column(
-            "connection_id",
-            sa.Integer(),
-            sa.ForeignKey("provider_connections.id", ondelete="SET NULL"),
-            nullable=True,
-        ),
-    )
+    # No FK on purpose: provider identity is immutable job history. SET NULL would
+    # relabel a deleted connection's jobs as OpenRouter jobs (wrong key for queued ones,
+    # cross-upstream dedup hits for succeeded ones); RESTRICT would make connections
+    # undeletable once any job exists. The worker fails a job whose connection is gone.
+    op.add_column("jobs", sa.Column("connection_id", sa.Integer(), nullable=True))
     op.drop_index("ix_jobs_dedup", table_name="jobs")
     op.create_index(
         "ix_jobs_dedup",
