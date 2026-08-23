@@ -88,8 +88,7 @@ async def count_running_jobs(db: AsyncSession, user_id: int) -> int:
     ).scalar_one()
 
 
-async def find_cached_job(
-    db: AsyncSession,
+def dedup_key(
     *,
     user_id: int,
     sha256: str,
@@ -100,30 +99,77 @@ async def find_cached_job(
     profile_version: int,
     pages_spec: str,
     prompt_sha256: str,
-) -> Job | None:
-    """The dedup lookup: same user, bytes, model, upstream (id *and* endpoint snapshot —
-    editing a connection's URL repoints what its id means), profile, pages, prompt,
-    pipeline (docs/jobs.md § Dedup)."""
+) -> list:
+    """Everything that has to match for two uploads to be the same parse.
+
+    Same user, bytes, model, upstream (id *and* endpoint snapshot — editing a connection's
+    URL repoints what its id means), profile, pages, prompt, pipeline
+    (docs/jobs.md § Dedup). Status is the caller's: a finished parse answers the cache, an
+    unfinished one answers a retry.
+    """
+    return [
+        Job.user_id == user_id,
+        Job.sha256 == sha256,
+        Job.model == model,
+        Job.connection_id.is_(None)
+        if connection_id is None
+        else Job.connection_id == connection_id,
+        Job.connection_base_url.is_(None)
+        if connection_base_url is None
+        else Job.connection_base_url == connection_base_url,
+        Job.profile.is_(profile) if profile is None else Job.profile == profile,
+        Job.profile_version == profile_version,
+        Job.pages_spec == pages_spec,
+        Job.prompt_sha256 == prompt_sha256,
+        Job.pipeline_version == PIPELINE_VERSION,
+    ]
+
+
+async def find_cached_job(db: AsyncSession, **key) -> Job | None:
+    """The dedup lookup: a succeeded job for this exact parse (docs/jobs.md § Dedup)."""
     return (
         await db.execute(
             select(Job)
-            .where(
-                Job.user_id == user_id,
-                Job.sha256 == sha256,
-                Job.model == model,
-                Job.connection_id.is_(None)
-                if connection_id is None
-                else Job.connection_id == connection_id,
-                Job.connection_base_url.is_(None)
-                if connection_base_url is None
-                else Job.connection_base_url == connection_base_url,
-                Job.profile.is_(profile) if profile is None else Job.profile == profile,
-                Job.profile_version == profile_version,
-                Job.pages_spec == pages_spec,
-                Job.prompt_sha256 == prompt_sha256,
-                Job.pipeline_version == PIPELINE_VERSION,
-                Job.status == "succeeded",
-            )
+            .where(*dedup_key(**key), Job.status == "succeeded")
+            .order_by(Job.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def hold_dedup_key(db: AsyncSession, **key) -> None:
+    """Serialize everything that would enqueue this exact parse, until this commit.
+
+    Reading for an in-flight duplicate is not enough on its own: two uploads of the same
+    bytes can both find nothing and both enqueue, which is the user's key charged twice for
+    one document. A transaction-level advisory lock closes that — the second request waits
+    and then sees the first's committed job.
+
+    Keyed on a hash of the dedup key, so it only ever blocks a request that was about to
+    parse the same document for the same account; a hash collision costs two unrelated
+    uploads a few milliseconds and nothing else. PostgreSQL only, like the claim query: the
+    SQLite fallback runs one process at a time and has nothing to serialize.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    fingerprint = "\x1f".join(f"{name}={value!r}" for name, value in sorted(key.items()))
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:fingerprint))"),
+        {"fingerprint": fingerprint},
+    )
+
+
+async def find_active_job(db: AsyncSession, **key) -> Job | None:
+    """The same parse, already queued or running.
+
+    Not part of the dedup cache — an unfinished job has no result to serve. It exists for
+    one caller: a browser that lost the response to its upload and retried, which must not
+    buy the user a second parse of the same bytes (docs/jobs.md § Dedup).
+    """
+    return (
+        await db.execute(
+            select(Job)
+            .where(*dedup_key(**key), Job.status.in_(("queued", "running")))
             .order_by(Job.created_at.desc())
             .limit(1)
         )

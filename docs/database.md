@@ -55,6 +55,20 @@ jobs             id UUID PK, user_id FK, kind pdf|image, filename, media_type,
 job_pages        (job_id FK, page_no) PK, method NULL, status, error NULL
 results          job_id PK/FK, markdown TEXT, pages JSONB, figures JSONB,
                  errors JSONB, meta JSONB, created_at
+folders          id PK, user_id FK, parent_id FK folders NULL, name,
+                 created_at, updated_at
+                 UNIQUE (user_id, parent_id, name)
+                 UNIQUE (user_id, name) WHERE parent_id IS NULL   -- the root level
+                 -- the web file library's directories; parent_id NULL = root,
+                 -- ON DELETE CASCADE on the self-reference, so deleting a folder
+                 -- takes its subtree with it
+documents        id PK, user_id FK, folder_id FK folders NULL, job_id FK jobs,
+                 name, created_at, updated_at
+                 UNIQUE (user_id, folder_id, name)
+                 UNIQUE (user_id, name) WHERE folder_id IS NULL
+                 INDEX (user_id, created_at)
+                 -- one row = one file in the library = one parse result
+                 -- (docs/web.md § Files). folder_id NULL = root
 usage_log        id PK, user_id FK, job_id FK, model, prompt_tokens,
                  completion_tokens, cost NUMERIC(12,6), created_at
                  INDEX (user_id, created_at)
@@ -77,6 +91,8 @@ oauth_grants     id PK, client_id FK, user_id FK, kind code|access|refresh,
 - `user_settings.system_prompt` no longer exists: the migration turned each stored custom prompt into a `prompt_presets` row named "Custom prompt" and pointed `prompt_preset_id` at it, so behavior did not change for anyone.
 - **Editing** a connection's model only affects new jobs: `jobs.model` is snapshotted at enqueue like every other parse parameter. Editing its URL or key applies to jobs still queued on it — the worker resolves the row at run time, the same semantics as rotating the OpenRouter key while jobs are queued. Deliberate: snapshotting encrypted credentials onto job rows would copy secrets around, and a user edits their own connection precisely so pending work uses the fix. The dedup cache is protected separately by the `connection_base_url` snapshot ([jobs.md](./jobs.md) § Dedup).
 - `jobs.connection_id` carries **no foreign key** on purpose: the upstream a job ran on is immutable history. A FK with SET NULL would relabel a deleted connection's jobs as OpenRouter jobs — a still-queued one would then run against OpenRouter billing the wrong key, and a succeeded one would answer OpenRouter dedup lookups with another upstream's output; RESTRICT would make a connection undeletable once any job exists. Instead the id simply outlives the row: the worker fails a queued job whose connection is gone ("the provider connection for this job no longer exists"), and dedup keys keep matching only their own upstream (connection ids are never reused).
+- **A document is a library entry, not a second copy of the result.** `documents` names a parse and places it in a folder; the markdown lives in `results` exactly once, keyed by the job that produced it. Deleting a document deletes the entry only — the job stays in the parse history and its `usage_log` rows stay, because they are the billing record of something that really ran. Deleting a folder cascades to its subfolders and their documents, the way removing a directory does.
+- **The root level needs its own unique index.** `folders.parent_id` and `documents.folder_id` are NULL at the root, and PostgreSQL treats NULLs as distinct in a unique constraint, so `UNIQUE (user_id, parent_id, name)` would not stop two root folders called "Invoices". The partial indexes above close that. The application checks the same thing before writing, which is what turns a collision into `report (2).pdf` instead of a 409.
 - `results` holds parsed **output** (kept indefinitely); `jobs.source_path` points at a temp file that is deleted at terminal state — the DB never stores document bytes.
 - Job claiming and per-user caps: exact queries in [jobs.md](./jobs.md).
 - Timestamps are `timestamptz`, UTC.

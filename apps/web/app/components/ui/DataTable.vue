@@ -14,7 +14,9 @@
      takes the same left padding, so the eye has one left edge per column.
 
   Cells render through a per-column slot named `cell-<key>`, falling back to the column's
-  `value()`.
+  `value()`. A row can also carry attributes of its own through `rowAttrs` — what the file
+  library needs to make rows draggable and folder rows droppable, without a second table
+  living on that page.
 -->
 <script setup lang="ts" generic="Row">
 import type { TableColumn } from '~/lib/table'
@@ -26,10 +28,16 @@ withDefaults(
     rowKey: (row: Row) => string
     /** Accessible caption. Visually hidden — the panel header carries the visible title. */
     caption: string
-    /** `tight` is the usage tables' denser row; `normal` is jobs and keys. */
+    /** `tight` is the usage tables' denser row; `normal` is history, keys and files. */
     density?: 'normal' | 'tight'
+    /**
+     * Extra attributes for one row's `<tr>` — `class`, `draggable`, `onDragover` and the
+     * rest. Bound with `v-bind`, so listeners go in as `onEventname` keys; `class` merges
+     * with this component's own rather than replacing it.
+     */
+    rowAttrs?: (row: Row) => Record<string, unknown>
   }>(),
-  { density: 'normal' },
+  { density: 'normal', rowAttrs: undefined },
 )
 
 defineSlots<Record<string, (props: { row: Row }) => unknown>>()
@@ -53,7 +61,7 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
       </tr>
     </thead>
     <tbody>
-      <tr v-for="row in rows" :key="rowKey(row)">
+      <tr v-for="row in rows" :key="rowKey(row)" v-bind="rowAttrs?.(row)">
         <td
           v-for="column in columns"
           :key="column.key"

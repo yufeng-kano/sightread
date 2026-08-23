@@ -27,10 +27,19 @@ defineProps<{
     | 'menu'
     | 'dashboard'
     | 'keys'
-    | 'jobs'
+    | 'files'
+    | 'history'
     | 'connect'
     | 'settings'
     | 'scan-text'
+    | 'folder'
+    | 'folder-open'
+    | 'folder-input'
+    | 'file-text'
+    | 'image'
+    | 'upload'
+    | 'chevron-right'
+    | 'chevron-down'
 }>()
 </script>
 
@@ -61,8 +70,8 @@ defineProps<{
       <path d="M18 17V9M13 17V5M8 17v-3" />
     </template>
 
-    <!-- history (Jobs): a clock with a rewind arrow — the record of what already ran. -->
-    <template v-else-if="name === 'jobs'">
+    <!-- history: a clock with a rewind arrow — the record of what already ran. -->
+    <template v-else-if="name === 'history'">
       <path d="M3 12a9 9 0 1 0 3.13-6.82" />
       <path d="M3 4.5V9h4.5" />
       <path d="M12 7.5V12l3.5 2" />
@@ -140,6 +149,60 @@ defineProps<{
       <path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.36-2.64L3 16" />
       <path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.36 2.64L21 8" />
       <path d="M21 3v5h-5M3 21v-5h5" />
+    </template>
+
+    <!-- folders (Files): one folder behind another — the nav destination that is a tree. -->
+    <template v-else-if="name === 'files'">
+      <path d="M8 17a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h2.88a2 2 0 0 1 1.41.59l1.12 1.12a2 2 0 0 0 1.42.59H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2z" />
+      <path d="M2 8v11a2 2 0 0 0 2 2h14" />
+    </template>
+
+    <!-- folder: a closed directory in the tree and in the list. -->
+    <template v-else-if="name === 'folder'">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </template>
+
+    <!-- folder-open: the folder you are inside, and the one a drag is hovering over. -->
+    <template v-else-if="name === 'folder-open'">
+      <path d="M6 14l1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" />
+    </template>
+
+    <!-- folder-input: move this into a folder — the arrow points in. -->
+    <template v-else-if="name === 'folder-input'">
+      <path d="M2 9V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-1" />
+      <path d="M2 13h10" />
+      <path d="m9 16 3-3-3-3" />
+    </template>
+
+    <!-- file-text: a parsed PDF, lines and all. -->
+    <template v-else-if="name === 'file-text'">
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+      <path d="M16 13H8M16 17H8M10 9H8" />
+    </template>
+
+    <!-- image: a parsed image, distinguished from a PDF at a glance in the list. -->
+    <template v-else-if="name === 'image'">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="1.5" />
+      <path d="m21 15-3.09-3.09a2 2 0 0 0-2.82 0L6 21" />
+    </template>
+
+    <!-- upload: into the library, arrow up out of the tray. -->
+    <template v-else-if="name === 'upload'">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="m17 8-5-5-5 5" />
+      <path d="M12 3v12" />
+    </template>
+
+    <!-- chevron-right / chevron-down: a closed and an open disclosure in the folder tree,
+         and the separator between breadcrumbs. -->
+    <template v-else-if="name === 'chevron-right'">
+      <path d="m9 18 6-6-6-6" />
+    </template>
+
+    <template v-else-if="name === 'chevron-down'">
+      <path d="m6 9 6 6 6-6" />
     </template>
 
     <!-- check: the confirmation a copy swaps to. -->

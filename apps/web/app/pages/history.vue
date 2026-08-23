@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { getJobResult, listJobs, type JobResult, type JobStatus, type JobSummary } from '~/lib/api'
+import { formatShortDateTime } from '~/lib/format'
 import type { TableColumn } from '~/lib/table'
 
 definePageMeta({ middleware: 'authed' })
@@ -46,31 +47,12 @@ const tally = computed(() =>
   })),
 )
 
-/**
- * `MMM d, h:mm AM` — the shorter form, because the year is redundant on a job from this
- * year and was the widest thing in the column.
- *
- * It comes back for anything older. "Last 50 jobs" is a count, not a window: an account
- * that parses a document a year would otherwise show two jobs from different years with
- * identical timestamps.
- */
-function shortDateTime(iso: string): string {
-  const at = new Date(iso)
-  return new Intl.DateTimeFormat(locale.value, {
-    year: at.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(at)
-}
-
 const columns = computed<TableColumn<JobSummary>[]>(() => [
-  { key: 'file', header: t('jobs.columnFile') },
-  { key: 'status', header: t('jobs.columnStatus') },
-  { key: 'model', header: t('jobs.columnModel') },
-  { key: 'pages', header: t('jobs.columnPages'), numeric: true, width: '80px' },
-  { key: 'created', header: t('jobs.columnCreated'), numeric: true },
+  { key: 'file', header: t('history.columnFile') },
+  { key: 'status', header: t('history.columnStatus') },
+  { key: 'model', header: t('history.columnModel') },
+  { key: 'pages', header: t('history.columnPages'), numeric: true, width: '80px' },
+  { key: 'created', header: t('history.columnCreated'), numeric: true },
 ])
 
 async function showResult(job: JobSummary) {
@@ -93,13 +75,13 @@ async function showResult(job: JobSummary) {
 <template>
   <UiScreen>
     <UiRail>
-      <UiPageHeader :eyebrow="t('jobs.recent', { limit: JOB_LIMIT })" :title="t('jobs.headTitle')" />
+      <UiPageHeader :eyebrow="t('history.recent', { limit: JOB_LIMIT })" :title="t('history.headTitle')" />
 
       <dl v-if="data" class="tally">
         <div v-for="row in tally" :key="row.status" class="tally-row" :class="row.tone">
           <dt>
             <span class="dot" aria-hidden="true" />
-            {{ t(`jobs.status.${row.status}`) }}
+            {{ t(`status.${row.status}`) }}
           </dt>
           <dd class="tabular">{{ row.count }}</dd>
         </div>
@@ -114,9 +96,9 @@ async function showResult(job: JobSummary) {
         A failed refresh keeps the rows it already has — the banner says what went wrong, and
         blanking the page on top of that helps nobody.
       -->
-      <UiPanel :title="t('jobs.listTitle')" lead>
+      <UiPanel :title="t('history.listTitle')" lead>
         <template #meta>
-          <span>{{ t('jobs.newestFirst') }}</span>
+          <span>{{ t('history.newestFirst') }}</span>
           <UiButton
             variant="ghost"
             size="xs"
@@ -138,8 +120,8 @@ async function showResult(job: JobSummary) {
 
         <UiEmptyState
           v-else-if="data && !data.jobs.length"
-          :title="t('jobs.empty')"
-          :body="t('jobs.emptyBody')"
+          :title="t('history.empty')"
+          :body="t('history.emptyBody')"
         />
 
         <UiDataTable
@@ -147,7 +129,7 @@ async function showResult(job: JobSummary) {
           :columns="columns"
           :rows="data.jobs"
           :row-key="(job) => job.job_id"
-          :caption="t('jobs.listTitle')"
+          :caption="t('history.listTitle')"
         >
           <!-- The filename is the affordance: it is the row's identity and the thing worth
                opening, so it carries the underline rather than a separate icon button at the
@@ -164,7 +146,7 @@ async function showResult(job: JobSummary) {
             </button>
           </template>
           <template #cell-status="{ row }">
-            <UiStatusDot :tone="STATUS_TONE[row.status]" :label="t(`jobs.status.${row.status}`)" />
+            <UiStatusDot :tone="STATUS_TONE[row.status]" :label="t(`status.${row.status}`)" />
           </template>
           <template #cell-model="{ row }">
             <span class="model mono">{{ row.model }}</span>
@@ -173,14 +155,15 @@ async function showResult(job: JobSummary) {
             {{ row.page_count ? `${row.pages_done}/${row.page_count}` : row.pages_done }}
           </template>
           <template #cell-created="{ row }">
-            <span class="created">{{ shortDateTime(row.created_at) }}</span>
+            <span class="created">{{ formatShortDateTime(row.created_at, locale) }}</span>
           </template>
         </UiDataTable>
       </UiPanel>
     </UiRegion>
     <ResultViewer
       v-if="openJob"
-      :job="openJob"
+      :title="openJob.filename"
+      :error="openJob.error"
       :result="results.get(openJob.job_id) ?? null"
       :pending="inFlight.has(openJob.job_id)"
       :error-message="resultErrors.get(openJob.job_id) ?? null"

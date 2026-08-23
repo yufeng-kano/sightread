@@ -277,6 +277,73 @@ class Result(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
 
 
+class Folder(Base):
+    """A directory in the web file library (docs/web.md § Files).
+
+    `parent_id` NULL is the root. The self-reference cascades, so deleting a folder takes
+    its subtree — and, through `documents.folder_id`, the files in it — exactly the way
+    removing a directory does.
+    """
+
+    __tablename__ = "folders"
+    __table_args__ = (
+        UniqueConstraint("user_id", "parent_id", "name", name="uq_folders_parent_name"),
+        # The root level needs its own index: NULLs are distinct to a unique constraint, so
+        # the one above would happily allow two root folders called "Invoices"
+        # (docs/database.md § Rules).
+        Index(
+            "uq_folders_root_name",
+            "user_id",
+            "name",
+            unique=True,
+            postgresql_where=text("parent_id IS NULL"),
+            sqlite_where=text("parent_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    parent_id: Mapped[int | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow, onupdate=utcnow)
+
+
+class Document(Base):
+    """One file in the library: a name, a place in the tree, and the parse behind it.
+
+    A document is an entry, never a second copy of the output — the markdown lives in
+    `results`, keyed by `job_id`. Deleting one deletes the entry only; the job stays in the
+    parse history and its usage rows stay with it (docs/database.md § Rules).
+    """
+
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "folder_id", "name", name="uq_documents_folder_name"),
+        Index(
+            "uq_documents_root_name",
+            "user_id",
+            "name",
+            unique=True,
+            postgresql_where=text("folder_id IS NULL"),
+            sqlite_where=text("folder_id IS NULL"),
+        ),
+        Index("ix_documents_user_created", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="CASCADE"), nullable=True
+    )
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow, onupdate=utcnow)
+
+
 class UsageLog(Base):
     __tablename__ = "usage_log"
     __table_args__ = (Index("ix_usage_log_user_created", "user_id", "created_at"),)

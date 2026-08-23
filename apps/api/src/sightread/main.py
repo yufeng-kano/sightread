@@ -1,5 +1,6 @@
-"""FastAPI wiring: `/api` (control plane), `/v1` (data plane), `/oauth` plus
-`/.well-known/*` (authorization server) and `/mcp` (MCP shell) — one app, one process.
+"""FastAPI wiring: `/api` (control plane, including `/api/library`), `/v1` (data plane),
+`/oauth` plus `/.well-known/*` (authorization server) and `/mcp` (MCP shell) — one app, one
+process.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from .config import Settings, get_settings
 from .db.session import create_engine, create_sessionmaker
 from .errors import install_error_handlers
 from .mcp import mcp_session_manager, mount_mcp
-from .routes import control, oauth, v1
+from .routes import control, library, oauth, v1
 
 # Signed cookie holding only the transient OIDC state/PKCE verifier during a login
 # round trip. The durable credential is the server-side session row.
@@ -57,6 +58,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(control.router)
     if settings.dev_login_enabled:
         app.include_router(control.dev_router)
+    app.include_router(library.router)
     app.include_router(v1.router)
     app.include_router(oauth.router)
     mount_mcp(app)

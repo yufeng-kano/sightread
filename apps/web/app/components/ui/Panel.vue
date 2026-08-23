@@ -11,9 +11,10 @@
  * flex child defaults to `auto`, and one wide table would then push the whole content
  * region past the viewport instead of scrolling inside here.
  *
- * Two shapes. With a `title` it is a headed panel whose body holds a table or a list. With
- * `section` it is one full-height reading column — no header, generous padding — for the
- * screens whose data region is prose and controls rather than rows.
+ * Two shapes. With a `title` (or the `title` slot, for a heading that is not just a string)
+ * it is a headed panel whose body holds a table or a list. With `section` it is one
+ * full-height reading column — no header, generous padding — for the screens whose data
+ * region is prose and controls rather than rows.
  */
 defineProps<{
   title?: string
@@ -31,6 +32,11 @@ defineProps<{
 
 defineSlots<{
   default: () => unknown
+  /**
+   * Replaces the serif `<h2>`. For a heading that is more than a string — the file
+   * library's breadcrumb, which is a heading you can click your way back up.
+   */
+  title?: () => unknown
   /** Right of the heading: this dataset's own metadata ("34 days recorded") or one small button. */
   meta?: () => unknown
 }>()
@@ -60,8 +66,10 @@ defineExpose({ scrollToTop })
 
 <template>
   <section class="panel" :class="{ sunken, divided }">
-    <header v-if="title || $slots.meta" class="panel-head" :class="{ lead }">
-      <h2 v-if="title" class="panel-title">{{ title }}</h2>
+    <header v-if="title || $slots.title || $slots.meta" class="panel-head" :class="{ lead }">
+      <slot name="title">
+        <h2 v-if="title" class="panel-title">{{ title }}</h2>
+      </slot>
       <div v-if="$slots.meta" class="panel-meta">
         <slot name="meta" />
       </div>
