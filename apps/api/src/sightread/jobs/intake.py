@@ -76,7 +76,11 @@ def resolve_kind(filename: str, media_type: str) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class Target:
-    """What a job will run: model, profile facts, prompt and the upstream it calls."""
+    """What a job will run: model, profile facts, prompt and the upstream it calls.
+
+    `connection_base_url` snapshots the endpoint at enqueue time — part of the dedup key,
+    so editing a connection's URL invalidates the old endpoint's cached results.
+    """
 
     model: str
     profile: str | None
@@ -84,6 +88,7 @@ class Target:
     bbox_format: str
     prompt: str
     connection_id: int | None
+    connection_base_url: str | None
 
 
 async def resolve_target(user: User, model: str | None, profile_id: str | None) -> Target:
@@ -117,7 +122,9 @@ async def resolve_target(user: User, model: str | None, profile_id: str | None) 
                 400, "invalid_request", "No model configured: pass 'model' or set a default"
             )
         prompt = custom_prompt or transcription_prompt_template(None)
-        return Target(model, None, 0, BBOX_FORMAT_YXYX, prompt, connection.id)
+        return Target(
+            model, None, 0, BBOX_FORMAT_YXYX, prompt, connection.id, connection.base_url
+        )
 
     if profile_id:
         profile = get_profile(profile_id)
@@ -128,12 +135,12 @@ async def resolve_target(user: User, model: str | None, profile_id: str | None) 
             raise ApiError(503, "upstream", f"Profile '{profile_id}' has no available model")
         prompt = custom_prompt or profile.prompt_template
         return Target(
-            resolved, profile.id, profile.profile_version, profile.bbox_format, prompt, None
+            resolved, profile.id, profile.profile_version, profile.bbox_format, prompt, None, None
         )
 
     if model:
         prompt = custom_prompt or transcription_prompt_template(None)
-        return Target(model, None, 0, BBOX_FORMAT_YXYX, prompt, None)
+        return Target(model, None, 0, BBOX_FORMAT_YXYX, prompt, None, None)
 
     raise ApiError(
         400, "invalid_request", "No model configured: pass 'model' or 'profile', or set a default"
@@ -233,6 +240,7 @@ async def submit_parse(
             sha256=sha256,
             model=target.model,
             connection_id=target.connection_id,
+            connection_base_url=target.connection_base_url,
             profile=target.profile,
             profile_version=target.profile_version,
             pages_spec=pages_spec,
@@ -268,6 +276,7 @@ async def submit_parse(
         pages_spec=pages_spec,
         model=target.model,
         connection_id=target.connection_id,
+        connection_base_url=target.connection_base_url,
         profile=target.profile,
         profile_version=target.profile_version,
         bbox_format=target.bbox_format,

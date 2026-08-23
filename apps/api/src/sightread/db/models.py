@@ -225,6 +225,9 @@ class Job(Base):
     # queued one would then bill the wrong key, and a succeeded one would satisfy
     # OpenRouter dedup lookups with another upstream's output (docs/database.md).
     connection_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Endpoint snapshot at enqueue; part of the dedup key so editing a connection's URL
+    # invalidates results parsed through the old endpoint (docs/jobs.md § Dedup).
+    connection_base_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # The effective prompt template, verbatim; its hash is part of the dedup key.
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_sha256: Mapped[str] = mapped_column(String(64), default="", server_default="")

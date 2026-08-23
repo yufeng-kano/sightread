@@ -97,6 +97,43 @@ async def test_an_unreachable_endpoint_is_upstream_not_a_bad_key(signed_in) -> N
 
 
 @respx.mock
+async def test_a_non_object_model_list_is_an_upstream_error(signed_in) -> None:
+    """An endpoint answering `[]` (valid JSON, wrong shape) is its fault, not a 500."""
+    respx.get(MODELS_URL).mock(return_value=httpx.Response(200, json=[]))
+
+    response = await signed_in.post(
+        "/api/connections",
+        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        headers=CSRF_HEADERS,
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["type"] == "upstream"
+
+
+@respx.mock
+async def test_a_lost_duplicate_name_race_is_a_400_not_a_500(signed_in, monkeypatch) -> None:
+    """Two concurrent creates can both pass the pre-check; the loser's unique-constraint
+    violation must surface as the same 400 name conflict, not a 500."""
+    from sightread.routes import control
+
+    respx.get(MODELS_URL).mock(side_effect=_models_ok)
+    await _create_connection(signed_in)
+
+    async def race_passed_precheck(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(control, "_refuse_duplicate_connection_name", race_passed_precheck)
+    duplicate = await signed_in.post(
+        "/api/connections",
+        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        headers=CSRF_HEADERS,
+    )
+    assert duplicate.status_code == 400
+    assert duplicate.json()["error"]["type"] == "invalid_request"
+
+
+@respx.mock
 async def test_duplicate_connection_names_are_refused(signed_in) -> None:
     respx.get(MODELS_URL).mock(side_effect=_models_ok)
     await _create_connection(signed_in)
@@ -160,7 +197,23 @@ async def test_deleting_the_default_connection_falls_back_to_openrouter(signed_i
     assert settings["default_model"] is None
 
 
-def test_base_url_rules_outside_local() -> None:
+def _fake_getaddrinfo(host: str, *args, **kwargs):
+    """DNS stub: the test suite never resolves anything for real (docs/testing.md)."""
+    resolved = {
+        # 203.0.113.x (TEST-NET) would itself fail is_global — use a real global address.
+        "proxy.example": "93.184.216.34",
+        "ip6-localhost": "::1",
+        "internal.example": "10.0.0.8",
+    }
+    if host not in resolved:
+        raise OSError(f"unresolvable in tests: {host}")
+    return [(0, 0, 0, "", (resolved[host], 0))]
+
+
+def test_base_url_rules_outside_local(monkeypatch) -> None:
+    from sightread.upstream import openrouter
+
+    monkeypatch.setattr(openrouter, "_getaddrinfo", _fake_getaddrinfo)
     assert normalize_base_url(f" {BASE}/ ", "production") == BASE
     for bad in (
         "http://proxy.example/openai/v1",  # https only
@@ -183,6 +236,30 @@ def test_base_url_rules_outside_local() -> None:
             normalize_base_url(bad, "production")
     # Local development may point at a local endpoint over plain http.
     assert normalize_base_url("http://127.0.0.1:8787/openai/v1", "local") is not None
+
+
+def test_base_url_hostnames_are_resolved_and_checked(monkeypatch) -> None:
+    """A name whose DNS (or /etc/hosts) answer is non-global is refused at save time —
+    `ip6-localhost` → ::1 and an attacker domain → 10.x both count (docs/auth.md § 3)."""
+    from sightread.upstream import openrouter
+
+    monkeypatch.setattr(openrouter, "_getaddrinfo", _fake_getaddrinfo)
+    for bad in (
+        "https://ip6-localhost/v1",
+        "https://internal.example/v1",
+        "https://does-not-resolve.example/v1",
+    ):
+        with pytest.raises(ApiError):
+            normalize_base_url(bad, "production")
+    # Local skips the resolution check entirely — no DNS side effects on save.
+    assert normalize_base_url("https://whatever.internal/v1", "local") is not None
+
+
+def test_a_malformed_ipv6_host_is_a_400_not_a_500() -> None:
+    for env in ("local", "production"):
+        with pytest.raises(ApiError) as raised:
+            normalize_base_url("https://[bad/v1", env)
+        assert raised.value.status_code == 400
 
 
 def test_base_url_userinfo_is_refused_everywhere() -> None:

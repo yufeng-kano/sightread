@@ -101,6 +101,7 @@ export default {
     connectionEditTitle: 'Edit provider connection',
     connectionNameLabel: 'Name',
     connectionUrlLabel: 'Base URL',
+    connectionUrlPlaceholder: 'https://proxy.example.com/openai/v1',
     connectionUrlNote:
       'An OpenAI-compatible Chat Completions base URL — for a kano-proxy that is https://<your-host>/openai/v1. The key is validated against its /models before saving.',
     connectionKeyLabel: 'API key',

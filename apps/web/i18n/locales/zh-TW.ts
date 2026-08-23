@@ -100,6 +100,7 @@ export default {
     connectionEditTitle: '編輯供應端連線',
     connectionNameLabel: '名稱',
     connectionUrlLabel: 'Base URL',
+    connectionUrlPlaceholder: 'https://proxy.example.com/openai/v1',
     connectionUrlNote:
       '任何 OpenAI 相容的 Chat Completions base URL — 若是 kano-proxy，即 https://<你的主機>/openai/v1。儲存前會以該端點的 /models 驗證金鑰。',
     connectionKeyLabel: 'API 金鑰',

@@ -120,17 +120,46 @@ def _literal_ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | No
         return None
 
 
+# Module-level so tests can stub it: resolving a hostname is a real network side effect,
+# and the suite must never touch DNS (docs/testing.md).
+_getaddrinfo = socket.getaddrinfo
+
+
+def _resolved_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Every address `host` currently resolves to; 400 when it resolves to nothing."""
+    try:
+        infos = _getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ApiError(400, "invalid_request", "base_url's host could not be resolved") from exc
+    addresses = []
+    for info in infos:
+        try:
+            addresses.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    if not addresses:
+        raise ApiError(400, "invalid_request", "base_url's host could not be resolved")
+    return addresses
+
+
 def normalize_base_url(raw: str, app_env: str) -> str:
     """Validate and canonicalize a connection's base URL (docs/auth.md § 3).
 
     The app fetches this URL server-side, so outside local it must be https and must not
-    denote a loopback/link-local/private address — a hosted deployment must not be usable
-    as a probe into its own network. Userinfo is refused everywhere: `base_url` is stored
-    and displayed in plaintext, so credentials must never ride inside it.
+    denote a non-public address — a hosted deployment must not be usable as a probe into
+    its own network. A hostname is resolved here and every answer must be global, which
+    catches `/etc/hosts` aliases and attacker domains pointing inward; a later DNS change
+    (rebinding) is accepted residual risk, documented in docs/auth.md. Userinfo is refused
+    everywhere: `base_url` is stored and displayed in plaintext, so credentials must never
+    ride inside it.
     """
     candidate = raw.strip().rstrip("/")
-    parts = urlsplit(candidate)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    try:
+        parts = urlsplit(candidate)
+        host = parts.hostname
+    except ValueError as exc:  # e.g. a malformed bracketed IPv6 host — a typo, not a 500
+        raise ApiError(400, "invalid_request", "base_url must be an http(s) URL") from exc
+    if parts.scheme not in ("http", "https") or not host:
         raise ApiError(400, "invalid_request", "base_url must be an http(s) URL")
     if parts.query or parts.fragment:
         raise ApiError(400, "invalid_request", "base_url must not carry a query or fragment")
@@ -143,13 +172,11 @@ def normalize_base_url(raw: str, app_env: str) -> str:
     if app_env != "local":
         if parts.scheme != "https":
             raise ApiError(400, "invalid_request", "base_url must use https")
-        host = parts.hostname
-        address = _literal_ip(host)
-        if (
-            host == "localhost"
-            or host.endswith(".localhost")
-            or (address is not None and not address.is_global)
-        ):
+        if host == "localhost" or host.endswith(".localhost"):
+            raise ApiError(400, "invalid_request", "base_url must be a public endpoint")
+        literal = _literal_ip(host)
+        addresses = [literal] if literal is not None else _resolved_addresses(host)
+        if any(not address.is_global for address in addresses):
             raise ApiError(400, "invalid_request", "base_url must be a public endpoint")
     return candidate
 
@@ -182,6 +209,9 @@ async def fetch_connection_models(base_url: str, api_key: str) -> list[dict]:
         payload = response.json()
     except ValueError as exc:
         raise ApiError(502, "upstream", "The endpoint returned a non-JSON model list") from exc
+    # An upstream answering `[]` (or any non-object) is a broken endpoint, not our bug.
+    if not isinstance(payload, dict) or not isinstance(payload.get("data") or [], list):
+        raise ApiError(502, "upstream", "The endpoint returned an unreadable model list")
 
     models = []
     for entry in payload.get("data") or []:

@@ -109,6 +109,9 @@ def upgrade() -> None:
     # cross-upstream dedup hits for succeeded ones); RESTRICT would make connections
     # undeletable once any job exists. The worker fails a job whose connection is gone.
     op.add_column("jobs", sa.Column("connection_id", sa.Integer(), nullable=True))
+    # Endpoint snapshot at enqueue: editing a connection's URL must not let results from
+    # the old endpoint answer uploads aimed at the new one (docs/jobs.md § Dedup).
+    op.add_column("jobs", sa.Column("connection_base_url", sa.String(length=1024), nullable=True))
     op.drop_index("ix_jobs_dedup", table_name="jobs")
     op.create_index(
         "ix_jobs_dedup",
@@ -147,6 +150,7 @@ def downgrade() -> None:
         postgresql_where=DEDUP_WHERE,
         sqlite_where=DEDUP_WHERE,
     )
+    op.drop_column("jobs", "connection_base_url")
     op.drop_column("jobs", "connection_id")
 
     op.add_column("user_settings", sa.Column("system_prompt", sa.Text(), nullable=True))

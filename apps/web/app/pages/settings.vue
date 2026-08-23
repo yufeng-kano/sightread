@@ -748,7 +748,7 @@ async function removePrompt() {
           <UiTextInput
             :id="id"
             v-model="connUrl"
-            placeholder="https://proxy.example.com/openai/v1"
+            :placeholder="t('settings.connectionUrlPlaceholder')"
             required
           />
         </UiField>

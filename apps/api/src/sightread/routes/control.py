@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 
 from ..auth.api_keys import create_api_key
 from ..auth.crypto import encrypt_connection_key, encrypt_openrouter_key, mask_openrouter_key
@@ -284,6 +285,19 @@ class ConnectionUpdate(BaseModel):
     api_key: str | None = Field(default=None, min_length=8, max_length=512)
 
 
+async def _commit_or_name_conflict(db: DbSession, message: str) -> None:
+    """Commit, mapping a unique-name race to the same 400 the pre-check gives.
+
+    Two concurrent creates can both pass the duplicate pre-check before either commits;
+    the loser's constraint violation is an ordinary name conflict, not a 500.
+    """
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ApiError(400, "invalid_request", message) from exc
+
+
 def _connection_payload(row: ProviderConnection) -> dict:
     return {
         "id": row.id,
@@ -357,7 +371,7 @@ async def create_connection(
         masked=mask_openrouter_key(candidate),
     )
     db.add(row)
-    await db.commit()
+    await _commit_or_name_conflict(db, "A connection with this name already exists")
     return _connection_payload(row)
 
 
@@ -396,7 +410,7 @@ async def update_connection(
     row.name = name
     row.base_url = base_url
     row.updated_at = utcnow()
-    await db.commit()
+    await _commit_or_name_conflict(db, "A connection with this name already exists")
     return _connection_payload(row)
 
 
@@ -519,7 +533,7 @@ async def create_prompt(
     await _refuse_duplicate_prompt_name(db, user.id, name)
     row = PromptPreset(user_id=user.id, name=name, text=text)
     db.add(row)
-    await db.commit()
+    await _commit_or_name_conflict(db, "A prompt with this name already exists")
     return _prompt_payload(row)
 
 
@@ -538,7 +552,7 @@ async def update_prompt(
     if "text" in provided and body.text:
         row.text = _checked_prompt_text(body.text, settings)
     row.updated_at = utcnow()
-    await db.commit()
+    await _commit_or_name_conflict(db, "A prompt with this name already exists")
     return _prompt_payload(row)
 
 
