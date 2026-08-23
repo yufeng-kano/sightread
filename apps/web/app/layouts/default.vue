@@ -25,12 +25,17 @@ const localePath = useLocalePath()
 const switchLocalePath = useSwitchLocalePath()
 const auth = useAuth()
 
+/**
+ * Ordered by how often a screen is opened, not by when it was built: the two that are the
+ * work — Files and History — then the two that hand out credentials, and at the bottom the
+ * two you visit occasionally and then leave alone (docs/web.md § Pages).
+ */
 const NAV = [
-  { icon: 'dashboard', to: '/dashboard', label: 'nav.dashboard' },
   { icon: 'files', to: '/files', label: 'nav.files' },
   { icon: 'history', to: '/history', label: 'nav.history' },
   { icon: 'keys', to: '/keys', label: 'nav.keys' },
   { icon: 'connect', to: '/connect', label: 'nav.connect' },
+  { icon: 'dashboard', to: '/dashboard', label: 'nav.dashboard' },
   { icon: 'settings', to: '/settings', label: 'nav.settings' },
 ] as const
 
@@ -159,7 +164,7 @@ async function signOut() {
 
     <aside ref="sidebar" class="sidebar" :class="{ open: drawerOpen }">
       <div class="sidebar-head">
-        <AppBrand :to="localePath('/dashboard')" />
+        <AppBrand :to="localePath('/files')" />
         <UiButton
           class="drawer-close"
           variant="ghost"
@@ -246,7 +251,7 @@ async function signOut() {
         >
           <template #icon><UiIcon name="menu" /></template>
         </UiButton>
-        <AppBrand :to="localePath('/dashboard')" />
+        <AppBrand :to="localePath('/files')" />
       </header>
 
       <!--

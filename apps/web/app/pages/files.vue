@@ -32,6 +32,13 @@ import {
   type LibraryDocument,
   type LibraryFolder,
 } from '~/lib/api'
+import {
+  carriesFiles,
+  claimDrag,
+  dragClaim,
+  droppedFiles,
+  setDropEffect,
+} from '~/lib/dnd'
 import { formatBytes, formatShortDateTime } from '~/lib/format'
 import {
   canMoveFolder,
@@ -464,20 +471,40 @@ async function confirmDelete() {
 
 // --- dragging --------------------------------------------------------------
 
-/** What is being dragged inside the page. Files from the desktop are the `fileDrag` below. */
-const dragItem = ref<Row | null>(null)
-/** The folder a drag is currently over — the one drawn as the target. */
-const dropTarget = ref<FolderId | undefined>(undefined)
 /**
- * Depth counter, not a boolean: `dragenter`/`dragleave` fire for every child element, so a
- * boolean flickers the overlay off the moment the pointer crosses a row.
+ * Drag state, and the one rule that keeps it honest: `dragover` decides everything.
+ *
+ * It fires continuously on exactly one innermost element and bubbles to the window, so the
+ * handler nearest the pointer claims the event and the window clears whatever went
+ * unclaimed (lib/dnd.ts). `dragleave` is deliberately not used anywhere here — it fires for
+ * every child element a pointer crosses, so a row made of an icon and a name unlights
+ * itself halfway across, and browsers disagree about what `relatedTarget` holds on a drag.
  */
-const fileDragDepth = ref(0)
-const fileDrag = computed(() => fileDragDepth.value > 0)
 
-function carriesFiles(event: DragEvent): boolean {
-  return [...(event.dataTransfer?.types ?? [])].includes('Files')
-}
+/** What is being dragged inside the page. A drag from the desktop is `fileDrag`. */
+const dragItem = ref<Row | null>(null)
+/** The folder a drag is over — the one drawn as the target. */
+const dropTarget = ref<FolderId | undefined>(undefined)
+/** A drag carrying files is somewhere over the window. */
+const fileDrag = ref(false)
+/** …and it is over the list, so the overlay names where a drop would land. */
+const fileOverList = ref(false)
+
+/** How long the page waits for the next drag event before assuming the drag is gone. */
+const DRAG_IDLE_MS = 700
+let dragWatchdog: ReturnType<typeof setTimeout> | undefined
+
+/**
+ * How long an unlit frame has to last before the target really goes out.
+ *
+ * A pointer crossing the 1px rule between two tree rows lands one `dragover` on the list
+ * that holds them, and the browser dispatches the odd frame on a parent during a fast move.
+ * Both are single events between two that claim the same row, and unlighting on them makes
+ * the target blink all the way down a tree. So the clear is scheduled, and the next claim
+ * cancels it.
+ */
+const TARGET_CLEAR_MS = 80
+let clearTargetTimer: ReturnType<typeof setTimeout> | undefined
 
 /**
  * Whether this row can land in this folder. Takes the row rather than reading `dragItem`,
@@ -509,49 +536,141 @@ function startDrag(event: DragEvent, row: Row) {
   }
 }
 
+/** A folder dragged out of the rail is the same move as one dragged out of the list. */
+function startFolderDrag(folder: LibraryFolder, event: DragEvent) {
+  startDrag(event, { kind: 'folder', key: `folder-${folder.id}`, folder })
+}
+
+function holdTarget() {
+  clearTimeout(clearTargetTimer)
+  clearTargetTimer = undefined
+}
+
+function releaseTarget() {
+  if (clearTargetTimer !== undefined || dropTarget.value === undefined) {
+    return
+  }
+  clearTargetTimer = setTimeout(() => {
+    dropTarget.value = undefined
+    clearTargetTimer = undefined
+  }, TARGET_CLEAR_MS)
+}
+
+/** Everything a finished or abandoned drag leaves behind. */
 function endDrag() {
+  clearTimeout(dragWatchdog)
+  dragWatchdog = undefined
+  holdTarget()
   dragItem.value = null
+  dropTarget.value = undefined
+  fileDrag.value = false
+  fileOverList.value = false
+}
+
+/**
+ * A drag from the desktop ends with no event this page can rely on — it can be carried out
+ * of the window, and `dragend` fires on the source, which is another application. So the
+ * flags a file drag sets expire on their own if drag events stop arriving. `dragItem` is
+ * not touched: an internal drag does get a `dragend`, and dropping it after a trip outside
+ * the window has to still work.
+ */
+function dragGoneIdle() {
+  fileDrag.value = false
+  fileOverList.value = false
+  holdTarget()
   dropTarget.value = undefined
 }
 
+function onWindowDragOver(event: DragEvent) {
+  const claim = dragClaim(event)
+  const files = carriesFiles(event.dataTransfer)
+
+  fileDrag.value = files
+  fileOverList.value = files && claim === 'list'
+  if (claim === 'target') {
+    holdTarget()
+  } else {
+    releaseTarget()
+  }
+  if (claim === undefined && files) {
+    // Nothing on this page wants it. Swallowing it anyway is the point: a file dropped on
+    // a page that ignores it becomes a navigation, and the browser would replace the app
+    // with the PDF — in the middle of an upload, with a queue still in memory.
+    event.preventDefault()
+    setDropEffect(event, 'none')
+  }
+
+  clearTimeout(dragWatchdog)
+  dragWatchdog = setTimeout(dragGoneIdle, DRAG_IDLE_MS)
+}
+
+function onWindowDrop(event: DragEvent) {
+  // Preventing the default on `dragover` alone is not enough; the drop itself navigates.
+  if (!event.defaultPrevented && carriesFiles(event.dataTransfer)) {
+    event.preventDefault()
+  }
+  endDrag()
+}
+
+onMounted(() => {
+  window.addEventListener('dragover', onWindowDragOver)
+  window.addEventListener('drop', onWindowDrop)
+  // The row that started the drag can be replaced by a poll while the drag is in the air,
+  // and its own `dragend` then never arrives. The window's always does.
+  window.addEventListener('dragend', endDrag)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('dragover', onWindowDragOver)
+  window.removeEventListener('drop', onWindowDrop)
+  window.removeEventListener('dragend', endDrag)
+  clearTimeout(dragWatchdog)
+  clearTimeout(clearTargetTimer)
+})
+
 /** A drop onto a folder: either the desktop's files land in it, or a row moves into it. */
-function dropOn(target: FolderId, event?: DragEvent) {
-  const files = [...(event?.dataTransfer?.files ?? [])]
-  dropTarget.value = undefined
-  fileDragDepth.value = 0
+function dropOn(target: FolderId, event: DragEvent) {
+  const files = droppedFiles(event)
+  const item = dragItem.value
+  endDrag()
   if (files.length) {
     addToQueue(files, target)
     return
   }
-  const item = dragItem.value
-  dragItem.value = null
   if (canMoveInto(item, target)) {
     void moveRow(item!, target)
   }
 }
 
-function onRowDragOver(event: DragEvent, target: FolderId) {
-  if (!canDropOn(target)) {
+/**
+ * A folder row in the list, and a breadcrumb above it, take rows of this page only. Files
+ * dropped on the list go to the folder that is open — that is what the overlay says, and
+ * it covers the rows while it is up.
+ */
+function onTargetDragOver(event: DragEvent, target: FolderId) {
+  if (carriesFiles(event.dataTransfer) || !canMoveInto(dragItem.value, target)) {
     return
   }
   event.preventDefault()
+  claimDrag(event, 'target')
+  setDropEffect(event, 'move')
+  holdTarget()
   dropTarget.value = target
 }
 
-/** The region-wide target: files dropped anywhere on the list land in the open folder. */
-function onRegionDragEnter(event: DragEvent) {
-  if (carriesFiles(event)) {
-    fileDragDepth.value += 1
+/** The list itself: where files from the desktop land. */
+function onListDragOver(event: DragEvent) {
+  if (!carriesFiles(event.dataTransfer)) {
+    return
   }
+  event.preventDefault()
+  claimDrag(event, 'list')
+  setDropEffect(event, 'copy')
 }
 
-function onRegionDragLeave() {
-  fileDragDepth.value = Math.max(0, fileDragDepth.value - 1)
-}
-
-function onRegionDrop(event: DragEvent) {
-  fileDragDepth.value = 0
-  const files = [...(event.dataTransfer?.files ?? [])]
+function onListDrop(event: DragEvent) {
+  const files = droppedFiles(event)
+  endDrag()
   if (files.length) {
     addToQueue(files, currentFolder.value)
   }
@@ -571,11 +690,11 @@ function rowAttrs(row: Row): Record<string, unknown> {
   }
   return {
     ...base,
-    class: { 'drop-target': dropTarget.value === row.folder.id && canDropOn(row.folder.id) },
-    onDragover: (event: DragEvent) => onRowDragOver(event, row.folder.id),
-    onDragleave: () => (dropTarget.value = undefined),
+    class: { 'drop-target': dropTarget.value === row.folder.id },
+    onDragover: (event: DragEvent) => onTargetDragOver(event, row.folder.id),
     onDrop: (event: DragEvent) => {
       event.preventDefault()
+      // The list underneath would otherwise treat this as a drop on the open folder.
       event.stopPropagation()
       dropOn(row.folder.id, event)
     },
@@ -616,12 +735,13 @@ function rowAttrs(row: Row): Record<string, unknown> {
         :folders="folders"
         :selected="currentFolder"
         :expanded="expanded"
-        :droppable="!!dragItem || fileDrag"
+        live
         :can-drop="canDropOn"
         :drop-target="dropTarget"
         @select="openFolder"
         @toggle="toggleFolder"
         @hover="dropTarget = $event"
+        @drag-folder="startFolderDrag"
         @drop-on="dropOn"
       />
     </UiRail>
@@ -629,23 +749,20 @@ function rowAttrs(row: Row): Record<string, unknown> {
     <UiRegion>
       <!-- The whole data region is a drop target for files from the desktop; the overlay
            says which folder they would land in, and nothing else. -->
-      <div
-        class="contents"
-        :class="{ 'file-drag': fileDrag }"
-        @dragenter="onRegionDragEnter"
-        @dragover.prevent
-        @dragleave="onRegionDragLeave"
-        @drop.prevent="onRegionDrop"
-      >
+      <div class="contents" @dragover="onListDragOver" @drop.prevent="onListDrop">
         <UiPanel lead>
           <template #title>
+            <!-- Each crumb is also a drop target: dropping a row on the folder you came
+                 from is how a file manager moves something back up a level. -->
             <h2 class="crumbs">
               <button
                 type="button"
                 class="crumb"
-                :class="{ current: !crumbs.length }"
+                :class="{ current: !crumbs.length, target: dropTarget === null }"
                 :aria-current="!crumbs.length ? 'page' : undefined"
                 @click="openFolder(null)"
+                @dragover="onTargetDragOver($event, null)"
+                @drop.prevent.stop="dropOn(null, $event)"
               >
                 {{ t('files.root') }}
               </button>
@@ -654,9 +771,11 @@ function rowAttrs(row: Row): Record<string, unknown> {
                 <button
                   type="button"
                   class="crumb"
-                  :class="{ current: index === crumbs.length - 1 }"
+                  :class="{ current: index === crumbs.length - 1, target: dropTarget === crumb.id }"
                   :aria-current="index === crumbs.length - 1 ? 'page' : undefined"
                   @click="openFolder(crumb.id)"
+                  @dragover="onTargetDragOver($event, crumb.id)"
+                  @drop.prevent.stop="dropOn(crumb.id, $event)"
                 >
                   {{ crumb.name }}
                 </button>
@@ -838,7 +957,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
         </UiPanel>
 
         <!-- Where the files would land. A destination, not an instruction. -->
-        <div v-if="fileDrag" class="dropzone">
+        <div v-if="fileOverList" class="dropzone">
           <div class="dropzone-mark">
             <UiIcon name="folder-open" />
             <span>{{ crumbs.length ? crumbs[crumbs.length - 1]!.name : t('files.root') }}</span>
@@ -991,6 +1110,13 @@ function rowAttrs(row: Row): Record<string, unknown> {
 
 .crumb.current {
   color: var(--ink);
+}
+
+/* Lit only while a drag is over it. Underlined rather than boxed: a crumb is a word in a
+   heading, and a box around one word would jump the line. */
+.crumb.target {
+  color: var(--accent);
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .crumb-sep {

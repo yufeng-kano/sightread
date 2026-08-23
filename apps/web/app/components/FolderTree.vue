@@ -9,10 +9,11 @@
  * Home is a row like any other, because the root is a real place: you navigate to it, and
  * you drop things on it. It just has no folder row behind it, so its id is `null`.
  *
- * Two callers, one component: the rail on `/files` (where rows are drop targets) and the
- * move dialog (where a row is a destination to pick). The difference is `droppable`.
+ * Two callers, one component: the rail on `/files`, where a row can be dragged and dropped
+ * on, and the move dialog, where a row is only a destination to pick. That is `live`.
  */
 import type { LibraryFolder } from '~/lib/api'
+import { carriesFiles, claimDrag, setDropEffect } from '~/lib/dnd'
 import { flattenTree, type FolderId } from '~/lib/library'
 
 const props = withDefaults(
@@ -22,27 +23,30 @@ const props = withDefaults(
     selected: FolderId
     /** Which folders are open. A `Set` the parent owns, so the page can expand a path. */
     expanded: Set<number>
-    /** Rows accept drops while something is being dragged. */
-    droppable?: boolean
+    /** The working tree: its rows can be dragged, and they accept drops. */
+    live?: boolean
     /** Whether this row would accept the thing currently being dragged. */
     canDrop?: (target: FolderId) => boolean
     /** The row a drag is over right now — the one drawn as the target. */
     dropTarget?: FolderId
   }>(),
-  { droppable: false, canDrop: () => true, dropTarget: undefined },
+  { live: false, canDrop: () => false, dropTarget: undefined },
 )
 
 const emit = defineEmits<{
   select: [FolderId]
   toggle: [number]
-  /** A drag entered a row that accepts it; `null` means it left every row. */
-  hover: [FolderId | undefined]
-  dropOn: [FolderId]
+  /** The row a drag is over. The page clears it; this only ever names one. */
+  hover: [FolderId]
+  dropOn: [FolderId, DragEvent]
   /** A folder row started being dragged — the page decides what that means. */
-  dragFolder: [LibraryFolder]
+  dragFolder: [LibraryFolder, DragEvent]
 }>()
 
 const { t } = useI18n()
+
+/** How long a drag rests on a closed folder before it springs open, as in Finder. */
+const SPRING_MS = 600
 
 const rows = computed(() => flattenTree(props.folders, props.expanded))
 
@@ -52,16 +56,82 @@ function indent(depth: number): string {
 }
 
 function isTarget(id: FolderId): boolean {
-  return props.droppable && props.dropTarget === id && props.canDrop(id)
+  return props.live && props.dropTarget === id && props.canDrop(id)
 }
 
-function onDragOver(event: DragEvent, id: FolderId) {
-  if (!props.droppable || !props.canDrop(id)) {
+// --- spring-loaded folders --------------------------------------------------
+
+/**
+ * Resting a drag on a closed folder opens it, so a file can be dropped somewhere the tree
+ * was not showing when the drag started. Without it a drop into a nested folder means
+ * cancelling the drag, opening the level, and starting again.
+ */
+let springTimer: ReturnType<typeof setTimeout> | undefined
+let springingFor: number | undefined
+
+function cancelSpring() {
+  clearTimeout(springTimer)
+  springTimer = undefined
+  springingFor = undefined
+}
+
+function armSpring(id: FolderId) {
+  if (id === springingFor) {
     return
   }
-  // Without preventDefault the browser refuses the drop and shows the "no" cursor.
+  cancelSpring()
+  if (id === null || props.expanded.has(id)) {
+    return
+  }
+  const row = rows.value.find((candidate) => candidate.folder.id === id)
+  if (!row?.hasChildren) {
+    return
+  }
+  springingFor = id
+  springTimer = setTimeout(() => {
+    emit('toggle', id)
+    cancelSpring()
+  }, SPRING_MS)
+}
+
+/**
+ * A drag that walks off the tree stops arming anything, but the timer it already set would
+ * still fire — opening a folder half a second after the drop landed somewhere else. The
+ * page clears `dropTarget` the moment nothing claims the drag, so that is the signal.
+ */
+watch(
+  () => props.dropTarget,
+  (id) => {
+    if (id !== springingFor) {
+      cancelSpring()
+    }
+  },
+)
+
+onBeforeUnmount(cancelSpring)
+
+// --- drag events ------------------------------------------------------------
+
+function onDragOver(event: DragEvent, id: FolderId) {
+  if (!props.live || !props.canDrop(id)) {
+    // No preventDefault: the browser then shows the barred cursor, which is the truth.
+    cancelSpring()
+    return
+  }
+  // preventDefault is what makes this element a drop target at all; the claim tells the
+  // handlers this event bubbles through that it already found its home (lib/dnd.ts).
   event.preventDefault()
-  emit('hover', id)
+  claimDrag(event, 'target')
+  setDropEffect(event, carriesFiles(event.dataTransfer) ? 'copy' : 'move')
+  if (props.dropTarget !== id) {
+    emit('hover', id)
+  }
+  armSpring(id)
+}
+
+function onDrop(event: DragEvent, id: FolderId) {
+  cancelSpring()
+  emit('dropOn', id, event)
 }
 </script>
 
@@ -72,8 +142,7 @@ function onDragOver(event: DragEvent, id: FolderId) {
         class="row"
         :class="{ active: selected === null, target: isTarget(null) }"
         @dragover="onDragOver($event, null)"
-        @dragleave="emit('hover', undefined)"
-        @drop.prevent="emit('dropOn', null)"
+        @drop.prevent="onDrop($event, null)"
       >
         <span class="caret-space" />
         <button type="button" class="label" @click="emit('select', null)">
@@ -89,8 +158,7 @@ function onDragOver(event: DragEvent, id: FolderId) {
         :class="{ active: selected === row.folder.id, target: isTarget(row.folder.id) }"
         :style="{ paddingLeft: indent(row.depth) }"
         @dragover="onDragOver($event, row.folder.id)"
-        @dragleave="emit('hover', undefined)"
-        @drop.prevent="emit('dropOn', row.folder.id)"
+        @drop.prevent="onDrop($event, row.folder.id)"
       >
         <!-- The caret is its own control: opening a folder and going into it are two
              different intentions, and a single click cannot mean both. -->
@@ -114,10 +182,10 @@ function onDragOver(event: DragEvent, id: FolderId) {
         <button
           type="button"
           class="label"
-          :draggable="droppable ? 'true' : 'false'"
+          :draggable="live ? 'true' : 'false'"
           :title="row.folder.name"
           @click="emit('select', row.folder.id)"
-          @dragstart="emit('dragFolder', row.folder)"
+          @dragstart="emit('dragFolder', row.folder, $event)"
         >
           <UiIcon
             :name="

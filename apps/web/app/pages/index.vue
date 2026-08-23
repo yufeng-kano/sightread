@@ -47,7 +47,7 @@ onMounted(async () => {
   // The OAuth callback redirects to the web root, so this is the hop that lands a signed-in
   // visitor in the app. No signed-in variant of this page exists to fall back to.
   if (auth.signedIn.value) {
-    await navigateTo(localePath('/dashboard'))
+    await navigateTo(localePath('/files'))
     return
   }
   devLoginAvailable.value = await isDevLoginAvailable()
@@ -59,7 +59,7 @@ async function signInAsDeveloper() {
   try {
     await devLogin()
     await auth.refresh()
-    await navigateTo(localePath('/dashboard'))
+    await navigateTo(localePath('/files'))
   } catch (error) {
     devLoginError.value = await resolve(error)
   } finally {
