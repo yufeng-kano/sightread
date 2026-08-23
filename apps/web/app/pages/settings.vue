@@ -428,11 +428,20 @@ async function removeOpenRouterKey() {
  * controls on the right write, so it changes as they do — that is the point of putting it
  * opposite them rather than under each group as a "currently: …" line.
  */
-const summaryProvider = computed(
-  () => selectedConnection.value?.name ?? t('settings.providerOpenRouter'),
-)
+const summaryProvider = computed(() => {
+  // Same rule as the controls: a *missing* row is a connections list that has not answered,
+  // not OpenRouter. Reporting configuration the backend never returned is exactly the
+  // fabrication the rail is here to avoid.
+  if (providerUnresolved.value) {
+    return t('common.loading')
+  }
+  return selectedConnection.value?.name ?? t('settings.providerOpenRouter')
+})
 
 const summaryModel = computed(() => {
+  if (providerUnresolved.value) {
+    return t('common.loading')
+  }
   if (selectedConnection.value) {
     return connectionModelChoice.value || t('common.notSet')
   }

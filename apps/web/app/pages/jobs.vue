@@ -42,16 +42,22 @@ const tally = computed(() =>
 )
 
 /**
- * `MMM d, h:mm AM` — the shorter form. The year is redundant in a list of the 50 most recent
- * jobs, and it was the widest thing in the column.
+ * `MMM d, h:mm AM` — the shorter form, because the year is redundant on a job from this
+ * year and was the widest thing in the column.
+ *
+ * It comes back for anything older. "Last 50 jobs" is a count, not a window: an account
+ * that parses a document a year would otherwise show two jobs from different years with
+ * identical timestamps.
  */
 function shortDateTime(iso: string): string {
+  const at = new Date(iso)
   return new Intl.DateTimeFormat(locale.value, {
+    year: at.getFullYear() === new Date().getFullYear() ? undefined : 'numeric',
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
-  }).format(new Date(iso))
+  }).format(at)
 }
 
 const columns = computed<TableColumn<JobSummary>[]>(() => [
@@ -120,16 +126,19 @@ async function showResult(job: JobSummary) {
 
         <UiBanner v-if="errorMessage" class="state" tone="error">{{ errorMessage }}</UiBanner>
 
-        <UiSkeleton v-if="!data" class="state" :rows="6" />
+          <!-- Not just `!data`: a failed first load leaves data null with `pending` back to
+             false, and an animated skeleton beside a terminal error says the page is still
+             working when it has stopped. -->
+        <UiSkeleton v-if="!data && !errorMessage" class="state" :rows="6" />
 
         <UiEmptyState
-          v-else-if="!data.jobs.length"
+          v-else-if="data && !data.jobs.length"
           :title="t('jobs.empty')"
           :body="t('jobs.emptyBody')"
         />
 
         <UiDataTable
-          v-else
+          v-else-if="data"
           :columns="columns"
           :rows="data.jobs"
           :row-key="(job) => job.job_id"

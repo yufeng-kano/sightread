@@ -343,6 +343,20 @@ async function signOut() {
   transition: color var(--duration-fast) var(--ease);
 }
 
+/*
+ * The glyph stays 24px on a touch screen — it is a quiet control in a row of text — but the
+ * box you press grows to the same target as every other control there. Negative margins
+ * keep the taller hit area from pushing the foot row apart, so the design does not change,
+ * only what counts as a tap.
+ */
+@media (pointer: coarse) {
+  .sign-out {
+    width: var(--control-height);
+    height: var(--control-height);
+    margin: calc((var(--control-height) - 24px) / -2);
+  }
+}
+
 .sign-out:hover {
   color: var(--ink);
 }

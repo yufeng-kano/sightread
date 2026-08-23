@@ -153,17 +153,20 @@ async function confirmRevoke() {
         <!-- A failed refresh keeps the rows it already has; the banner says what went wrong. -->
         <UiBanner v-if="errorMessage" class="state" tone="error">{{ errorMessage }}</UiBanner>
 
-        <UiSkeleton v-if="!data" class="state" />
+        <!-- Not just `!data`: a failed first load leaves data null with `pending` back to
+             false, and an animated skeleton beside a terminal error says the page is still
+             working when it has stopped. -->
+        <UiSkeleton v-if="!data && !errorMessage" class="state" />
 
         <!-- No action here: Create key is in the rail, present in every state of the page. -->
         <UiEmptyState
-          v-else-if="!data.keys.length"
+          v-else-if="data && !data.keys.length"
           :title="t('keys.empty')"
           :body="t('keys.emptyBody')"
         />
 
         <UiDataTable
-          v-else
+          v-else-if="data"
           :columns="columns"
           :rows="data.keys"
           :row-key="(key) => String(key.id)"

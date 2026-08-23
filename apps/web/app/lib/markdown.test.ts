@@ -126,3 +126,47 @@ describe('parseResultMarkdown lists', () => {
     ])
   })
 })
+
+describe('parseResultMarkdown tables', () => {
+  it('reads a GFM table whose rows omit the outer pipes', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'Region | Revenue', '--- | ---', 'APAC | 1,204'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'table', header: ['Region', 'Revenue'], rows: [['APAC', '1,204']] },
+    ])
+  })
+
+  it('does not let a paragraph swallow an unpiped table that follows it', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'By region:', 'Region | Revenue', '--- | ---', 'APAC | 1,204'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'p', text: 'By region:' },
+      { kind: 'table', header: ['Region', 'Revenue'], rows: [['APAC', '1,204']] },
+    ])
+  })
+
+  it('leaves a sentence containing a pipe as prose', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'Run `a | b` to pipe the output.', 'It prints nothing.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'p', text: 'Run `a | b` to pipe the output. It prints nothing.' },
+    ])
+  })
+
+  it('ends a table at the prose under it', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '| A | B |', '| --- | --- |', '| 1 | 2 |', 'Totals are provisional.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'table', header: ['A', 'B'], rows: [['1', '2']] },
+      { kind: 'p', text: 'Totals are provisional.' },
+    ])
+  })
+})

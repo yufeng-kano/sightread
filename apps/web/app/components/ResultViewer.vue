@@ -59,6 +59,20 @@ watch(
   { immediate: true },
 )
 
+/**
+ * The JSON tab replaces the whole body, so coming back mounts a fresh scroller at the top
+ * while `activePage` still names wherever the reader had got to — the rail would highlight
+ * page 5 over a document showing page 1. `pages` has not changed, so its watcher will not
+ * do this for us.
+ */
+watch(tab, async (view) => {
+  if (view !== 'markdown' || !activePage.value) {
+    return
+  }
+  await nextTick()
+  goToPage(activePage.value)
+})
+
 const scroller = ref<HTMLElement | null>(null)
 const sections = new Map<number, HTMLElement>()
 /** Set while a click-driven scroll is still settling, so `onScroll` does not overrule it. */

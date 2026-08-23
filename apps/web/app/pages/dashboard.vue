@@ -117,7 +117,10 @@ const dayColumns = computed<TableColumn<UsageRow>[]>(() => [
         <ul v-if="summary?.models.length" class="models">
           <li v-for="row in summary.models" :key="row.label" class="model">
             <div class="model-main">
-              <p class="model-id mono">{{ row.label }}</p>
+              <!-- Ellipsized to keep the row rhythm, but never lost: two models sharing a
+                 long provider prefix must stay tellable apart, and this figure is what
+                 attributes the cost beside it. -->
+            <p class="model-id mono" :title="row.label">{{ row.label }}</p>
               <UiUsageBar :share="row.costShare" :label="row.label" />
               <p class="model-tokens tabular">
                 {{

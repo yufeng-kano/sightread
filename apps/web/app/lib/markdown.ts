@@ -38,9 +38,19 @@ const COMMENT = /^<!--.*-->$/
 /** `- item`, `* item`, `+ item`, `1. item`, `2) item`. */
 const LIST_ITEM = /^([-*+]|\d{1,9}[.)])\s+(.*)$/
 
-/** A pipe table's separator row: `| --- | :--: |`. */
+/** A pipe table's separator row: `| --- | :--: |`, with or without the outer pipes. */
 function isTableRule(line: string): boolean {
   return /^\|?[\s|:-]+\|[\s|:-]*$/.test(line) && line.includes('-')
+}
+
+/**
+ * A table is its header row *plus* the separator under it — GFM makes the outer pipes
+ * optional, so `Name | Value` over `--- | ---` is as valid as the fully piped form and the
+ * only reliable marker is the separator. Looking one line ahead is what lets both forms in
+ * without treating every sentence containing a pipe as a table.
+ */
+function isTableStart(line: string, next: string): boolean {
+  return line.includes('|') && isTableRule(next)
 }
 
 /** `1.` and `2)` are ordered; `-`, `*` and `+` are not. */
@@ -48,11 +58,15 @@ function isOrdered(marker: string): boolean {
   return !'-*+'.includes(marker)
 }
 
-/** Every line that starts a block of its own — so a paragraph knows where to stop. */
-function startsBlock(line: string): boolean {
+/**
+ * Every line that starts a block of its own — so a paragraph knows where to stop. `next` is
+ * the line after it, which only the table check needs.
+ */
+function startsBlock(line: string, next = ''): boolean {
   return (
     !line ||
     line.startsWith('|') ||
+    isTableStart(line, next) ||
     line.startsWith('#') ||
     LIST_ITEM.test(line) ||
     FIGURE.test(line) ||
@@ -113,7 +127,7 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       // The caption is written verbatim on the next line, and only there — anything that
       // starts another block is the next block, not this figure's caption.
       const next = (lines[index + 1] ?? '').trim()
-      const captioned = Boolean(next) && !startsBlock(next)
+      const captioned = Boolean(next) && !startsBlock(next, (lines[index + 2] ?? '').trim())
       if (captioned) {
         index += 1
       }
@@ -158,11 +172,16 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       continue
     }
 
-    if (line.startsWith('|')) {
+    if (line.startsWith('|') || isTableStart(line, (lines[index + 1] ?? '').trim())) {
       const rows: string[][] = []
       let cursor = index
-      while (cursor < lines.length && (lines[cursor] ?? '').trim().startsWith('|')) {
+      while (cursor < lines.length) {
         const row = (lines[cursor] ?? '').trim()
+        // A row is anything still carrying a pipe. Once the pipes stop, so does the table —
+        // the prose under it is the next block.
+        if (!row.includes('|')) {
+          break
+        }
         if (!isTableRule(row)) {
           rows.push(splitRow(row))
         }
@@ -179,7 +198,7 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
     let cursor = index + 1
     while (cursor < lines.length) {
       const next = (lines[cursor] ?? '').trim()
-      if (startsBlock(next)) {
+      if (startsBlock(next, (lines[cursor + 1] ?? '').trim())) {
         break
       }
       paragraph.push(next)
