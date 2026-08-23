@@ -15,9 +15,15 @@ const { resolve } = useApiError()
 /** The row whose result is open. A parsed document is a document, so it gets a dialog rather
     than a row that grows to twenty lines and pushes every other job off the screen. */
 const openJob = ref<JobSummary | null>(null)
-const loadingResultId = ref<string | null>(null)
 const results = reactive(new Map<string, JobResult>())
 const resultErrors = reactive(new Map<string, string>())
+/**
+ * Job ids with a result request in flight. A set, not one shared "currently loading" id:
+ * the viewer can be closed and reopened on a different job while the first request is
+ * still running, and a single id cannot say which of them is pending. It also makes a
+ * reopen cheap — the job is already being fetched, so no second request is started.
+ */
+const inFlight = reactive(new Set<string>())
 
 /** Never color alone: each tone ships with the status word beside it. Succeeded is the
     accent — a finished job is the data this page is about — and running sits outside the
@@ -70,22 +76,17 @@ const columns = computed<TableColumn<JobSummary>[]>(() => [
 
 async function showResult(job: JobSummary) {
   openJob.value = job
-  if (results.has(job.job_id)) {
+  if (results.has(job.job_id) || inFlight.has(job.job_id)) {
     return
   }
-  loadingResultId.value = job.job_id
+  inFlight.add(job.job_id)
   resultErrors.delete(job.job_id)
   try {
     results.set(job.job_id, await getJobResult(job.job_id))
   } catch (error) {
     resultErrors.set(job.job_id, await resolve(error))
   } finally {
-    // Only if this request still owns the flag. Open A, close it before it lands, open B:
-    // A's answer would otherwise clear B's pending state, and the viewer would tell the
-    // reader that a job still loading had produced no markdown.
-    if (loadingResultId.value === job.job_id) {
-      loadingResultId.value = null
-    }
+    inFlight.delete(job.job_id)
   }
 }
 </script>
@@ -182,7 +183,7 @@ async function showResult(job: JobSummary) {
       v-if="openJob"
       :job="openJob"
       :result="results.get(openJob.job_id) ?? null"
-      :pending="loadingResultId === openJob.job_id"
+      :pending="inFlight.has(openJob.job_id)"
       :error-message="resultErrors.get(openJob.job_id) ?? null"
       @close="openJob = null"
     />
