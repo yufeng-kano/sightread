@@ -8,9 +8,14 @@
  * than being asked of an API whose contract is the markdown itself.
  *
  * This is deliberately not a general markdown parser. It understands exactly the shapes the
- * transcription prompt asks the model for: headings, paragraphs, lists, pipe tables and
- * figure placeholders (docs/parsing.md § Prompt). Anything else stays a paragraph, which
- * renders as its own source text rather than disappearing.
+ * transcription prompt asks the model for: headings, paragraphs, lists, pipe tables, fenced
+ * code, display math and figure placeholders (docs/parsing.md § Prompt). Anything else stays
+ * a paragraph, which renders as its own source text rather than disappearing.
+ *
+ * It is also flat, and knowingly so: a nested list comes out as one level and inline
+ * emphasis comes out as its source characters. The content survives, the structure does not.
+ * The alternative is not a deeper version of this — it is rendering through a real GFM
+ * parser, which is a dependency and a sanitisation decision (docs/web.md § Result viewer).
  */
 
 /** `[ymin, xmin, ymax, xmax]`, 0–1000 normalized — the `bbox_format` the result declares. */

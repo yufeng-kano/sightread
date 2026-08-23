@@ -212,6 +212,16 @@ async function signOut() {
   transform: none;
 }
 
+/*
+ * Only the drawer layout has a scrim, and `drawerOpen` can still be true when the viewport
+ * crosses back above the breakpoint — a rotated tablet. Declared hidden here rather than
+ * only styled inside the media query: an unstyled `div` is a perfectly good grid child, and
+ * it was taking the sidebar's cell and pushing the whole frame one column over.
+ */
+.scrim {
+  display: none;
+}
+
 /* --- Sidebar -------------------------------------------------------------- */
 
 .sidebar {
@@ -400,6 +410,7 @@ async function signOut() {
   }
 
   .scrim {
+    display: block;
     position: fixed;
     inset: 0;
     z-index: 40;

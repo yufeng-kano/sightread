@@ -80,7 +80,12 @@ async function showResult(job: JobSummary) {
   } catch (error) {
     resultErrors.set(job.job_id, await resolve(error))
   } finally {
-    loadingResultId.value = null
+    // Only if this request still owns the flag. Open A, close it before it lands, open B:
+    // A's answer would otherwise clear B's pending state, and the viewer would tell the
+    // reader that a job still loading had produced no markdown.
+    if (loadingResultId.value === job.job_id) {
+      loadingResultId.value = null
+    }
   }
 }
 </script>
