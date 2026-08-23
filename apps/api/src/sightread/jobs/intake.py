@@ -34,6 +34,7 @@ from .queue import (
     enqueue_job,
     find_active_job,
     find_cached_job,
+    hold_dedup_key,
     normalize_pages_spec,
     parse_pages_spec,
 )
@@ -321,6 +322,9 @@ async def submit_parse(
             return Submission(cached=result)
 
         if reuse_in_flight:
+            # Held until this transaction commits, so a second upload of the same bytes
+            # waits here rather than racing past the check below into its own parse.
+            await hold_dedup_key(db, **key)
             active = await find_active_job(db, **key)
             if active is not None:
                 # The same parse is already on its way. Starting another would spend the

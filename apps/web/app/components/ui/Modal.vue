@@ -19,7 +19,7 @@
  * is not inside the scrolling region at all. `overscroll-behavior: contain` on the panel
  * body stops a scroll that reaches its end from chaining anywhere.
  */
-withDefaults(
+const props = withDefaults(
   defineProps<{
     /** The dialog's accessible name. Also the visible title unless the `title` slot fills it. */
     title: string
@@ -28,6 +28,14 @@ withDefaults(
     tall?: boolean
     /** The body manages its own padding. */
     flush?: boolean
+    /**
+     * A request this dialog started is still running, so it cannot be dismissed. Closing
+     * it would not stop the request: a delete would land after the reader believed they
+     * had backed out of it, and a failure would surface somewhere they are no longer
+     * looking. The controls are already disabled while this is set — Escape and the scrim
+     * are the two routes that would otherwise go around them.
+     */
+    busy?: boolean
   }>(),
   { size: 'sm' },
 )
@@ -61,7 +69,9 @@ function focusables(): HTMLElement[] {
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') {
     event.stopPropagation()
-    emit('close')
+    if (!props.busy) {
+      emit('close')
+    }
     return
   }
   if (event.key !== 'Tab') {
@@ -108,7 +118,7 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <div class="overlay" @click.self="emit('close')">
+    <div class="overlay" @click.self="busy || emit('close')">
       <div
         ref="panel"
         class="panel"
@@ -131,6 +141,7 @@ onBeforeUnmount(() => {
               variant="ghost"
               size="sm"
               icon-only
+              :disabled="busy"
               :label="t('common.close')"
               @click="emit('close')"
             >

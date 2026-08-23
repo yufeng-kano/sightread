@@ -151,9 +151,7 @@ async def parse(request: Request, caller: UploaderCaller, db: DbSession, setting
                 ),
             ).parse()
         except MultiPartException as exc:
-            raise ApiError(
-                400, "invalid_request", "The multipart body could not be read"
-            ) from exc
+            raise ApiError(400, "invalid_request", "The multipart body could not be read") from exc
         upload = form.get("file")
         if not isinstance(upload, UploadFile):
             raise ApiError(400, "invalid_request", "Multipart requests need a 'file' part")

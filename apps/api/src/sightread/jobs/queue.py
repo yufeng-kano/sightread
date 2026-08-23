@@ -137,6 +137,28 @@ async def find_cached_job(db: AsyncSession, **key) -> Job | None:
     ).scalar_one_or_none()
 
 
+async def hold_dedup_key(db: AsyncSession, **key) -> None:
+    """Serialize everything that would enqueue this exact parse, until this commit.
+
+    Reading for an in-flight duplicate is not enough on its own: two uploads of the same
+    bytes can both find nothing and both enqueue, which is the user's key charged twice for
+    one document. A transaction-level advisory lock closes that — the second request waits
+    and then sees the first's committed job.
+
+    Keyed on a hash of the dedup key, so it only ever blocks a request that was about to
+    parse the same document for the same account; a hash collision costs two unrelated
+    uploads a few milliseconds and nothing else. PostgreSQL only, like the claim query: the
+    SQLite fallback runs one process at a time and has nothing to serialize.
+    """
+    if db.get_bind().dialect.name != "postgresql":
+        return
+    fingerprint = "\x1f".join(f"{name}={value!r}" for name, value in sorted(key.items()))
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:fingerprint))"),
+        {"fingerprint": fingerprint},
+    )
+
+
 async def find_active_job(db: AsyncSession, **key) -> Job | None:
     """The same parse, already queued or running.
 

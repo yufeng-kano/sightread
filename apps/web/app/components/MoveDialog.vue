@@ -53,7 +53,7 @@ const canMove = computed(
 </script>
 
 <template>
-  <UiModal :title="t('files.moveTitle')" @close="emit('cancel')">
+  <UiModal :title="t('files.moveTitle')" :busy="pending" @close="emit('cancel')">
     <template #title>
       <h2 class="title">{{ t('files.moveTitle') }}</h2>
       <p class="subject">{{ name }}</p>

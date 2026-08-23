@@ -29,7 +29,7 @@ const { t } = useI18n()
 </script>
 
 <template>
-  <UiModal :title="title" @close="emit('cancel')">
+  <UiModal :title="title" :busy="pending" @close="emit('cancel')">
     <p class="message">{{ message }}</p>
     <UiBanner v-if="error" class="failure" tone="error">{{ error }}</UiBanner>
     <template #footer>

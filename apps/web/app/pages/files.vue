@@ -55,6 +55,11 @@ import type { TableColumn } from '~/lib/table'
 
 definePageMeta({ middleware: 'authed' })
 
+/** What the API accepts, so a field cannot present as valid what the server will refuse
+ *  (`folders.name` and `documents.name`, docs/database.md). */
+const FOLDER_NAME_MAX = 255
+const DOCUMENT_NAME_MAX = 512
+
 /** How often the list re-reads itself while a parse is in flight. */
 const POLL_MS = 2000
 /** How long a file refused by the per-user job cap waits before trying again. */
@@ -1028,11 +1033,12 @@ function rowAttrs(row: Row): Record<string, unknown> {
     <UiModal
       v-if="showNewFolder"
       :title="t('files.newFolder')"
+      :busy="busy"
       @close="showNewFolder = false"
     >
       <form id="new-folder" @submit.prevent="submitNewFolder">
         <UiField v-slot="{ id }" :label="t('files.nameLabel')">
-          <UiTextInput :id="id" v-model="newFolderName" :maxlength="255" required />
+          <UiTextInput :id="id" v-model="newFolderName" :maxlength="FOLDER_NAME_MAX" required />
         </UiField>
         <UiBanner v-if="mutationError" class="dialog-error" tone="error">
           {{ mutationError }}
@@ -1057,11 +1063,17 @@ function rowAttrs(row: Row): Record<string, unknown> {
     <UiModal
       v-if="renaming"
       :title="renaming.kind === 'folder' ? t('files.renameFolder') : t('files.renameFile')"
+      :busy="busy"
       @close="renaming = null"
     >
       <form id="rename" @submit.prevent="submitRename">
         <UiField v-slot="{ id }" :label="t('files.nameLabel')">
-          <UiTextInput :id="id" v-model="renameValue" :maxlength="512" required />
+          <UiTextInput
+            :id="id"
+            v-model="renameValue"
+            :maxlength="renaming.kind === 'folder' ? FOLDER_NAME_MAX : DOCUMENT_NAME_MAX"
+            required
+          />
         </UiField>
         <UiBanner v-if="mutationError" class="dialog-error" tone="error">
           {{ mutationError }}

@@ -275,13 +275,16 @@ async def read_folders(db: DbSession, user_id: int):
 async def read_library(user: SessionUser, db: DbSession):
     """The whole library in one read — navigation between folders is then local.
 
-    Two statements under READ COMMITTED see two snapshots, so a folder created between
-    them arrives after the documents that moved into it: the client would hold documents
-    whose folder it has never heard of and draw them nowhere. Re-reading the folders when
-    that happens costs one query in a race that is otherwise invisible, and converges — a
-    folder a live document points at cannot have been deleted, since deleting one takes
-    its documents with it.
+    Both collections come from one snapshot. Under READ COMMITTED the two statements would
+    see two, and the client would hold either documents whose folder it has never heard of
+    (drawn nowhere) or a folder that has already been deleted (drawn empty) until something
+    refreshed. `REPEATABLE READ` is the cheap way to make one response internally
+    consistent; the SQLite test fallback has no such isolation level and one writer, so it
+    is asked for only where it exists.
     """
+    if db.get_bind().dialect.name == "postgresql":
+        await db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+
     folders = await read_folders(db, user.id)
     documents = (
         await db.execute(
@@ -291,10 +294,6 @@ async def read_library(user: SessionUser, db: DbSession):
             .order_by(Document.created_at.desc())
         )
     ).all()
-
-    known = {row.id for row in folders}
-    if any(row.folder_id is not None and row.folder_id not in known for row, _ in documents):
-        folders = await read_folders(db, user.id)
 
     return {
         "folders": [folder_payload(row) for row in folders],
@@ -322,14 +321,22 @@ async def create_folder(body: FolderCreate, user: SessionUser, db: DbSession):
     if body.parent_id is not None:
         await owned_folder(db, user.id, body.parent_id)
     parent_id = body.parent_id
-    row = await insert_named(
-        db,
-        build=lambda name: Folder(user_id=user.id, parent_id=parent_id, name=name),
-        taken=lambda: folder_names(db, user.id, parent_id),
-        wanted=clean_name(body.name, FOLDER_NAME_MAX),
-        limit=FOLDER_NAME_MAX,
-        message="A folder with this name already exists here",
-    )
+    try:
+        row = await insert_named(
+            db,
+            build=lambda name: Folder(user_id=user.id, parent_id=parent_id, name=name),
+            taken=lambda: folder_names(db, user.id, parent_id),
+            wanted=clean_name(body.name, FOLDER_NAME_MAX),
+            limit=FOLDER_NAME_MAX,
+            message="A folder with this name already exists here",
+        )
+    except ApiError:
+        # A parent deleted between the check above and the insert fails the foreign key,
+        # which arrives as the same IntegrityError a taken name does — and retrying with a
+        # destination that no longer exists only ever produces a 409 about the wrong thing.
+        if parent_id is None or await folder_exists(db, user.id, parent_id):
+            raise
+        raise ApiError(404, "invalid_request", "No such folder") from None
     return folder_payload(row)
 
 
