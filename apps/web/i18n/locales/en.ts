@@ -1,7 +1,7 @@
 // Source catalog. Every user-visible string in the app lives here (docs/web.md).
 export default {
   app: {
-    name: 'agent-sightread',
+    name: 'Sightread',
     skipToContent: 'Skip to content',
   },
   nav: {
@@ -35,7 +35,7 @@ export default {
     unexpected: 'Something went wrong.',
   },
   login: {
-    seoTitle: 'agent-sightread — parse PDFs and images into markdown with figure coordinates',
+    seoTitle: 'Sightread — parse PDFs and images into markdown with figure coordinates',
     seoDescription:
       'Hosted vision document parsing. POST a PDF or image, get markdown with figure bounding boxes, billed to your own OpenRouter key. REST API and MCP connector for Claude.',
     pitchTitle: 'PDFs and images in, markdown with figure coordinates out.',
