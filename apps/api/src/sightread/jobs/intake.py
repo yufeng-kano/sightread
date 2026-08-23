@@ -98,13 +98,15 @@ async def resolve_target(user: User, model: str | None, profile_id: str | None) 
     runs the default prompt and is untested by us. The user's selected prompt preset, when
     one is set, replaces the template in every case (docs/parsing.md § Prompts). When the
     user's default connection is a custom OpenAI-compatible endpoint, profiles do not
-    apply and the model id belongs to that endpoint's catalog (docs/api.md § Upstreams).
+    apply and the model comes from the connection itself — a connection is a complete
+    profile, so `user_settings.default_model` never applies to it (docs/api.md §
+    Upstreams).
     """
     settings_row = user.settings
     preset = settings_row.prompt_preset if settings_row else None
     custom_prompt = preset.text if preset else None
     connection = settings_row.default_connection if settings_row else None
-    if not model and not profile_id:
+    if not model and not profile_id and connection is None:
         profile_id = settings_row.default_profile if settings_row else None
         model = settings_row.default_model if settings_row else None
     if model and profile_id:
@@ -117,9 +119,14 @@ async def resolve_target(user: User, model: str | None, profile_id: str | None) 
                 "invalid_request",
                 "Profiles run on OpenRouter only; pass 'model' or switch back to OpenRouter",
             )
+        # An explicit request model still overrides; the connection's own model is the
+        # default. NULL only on rows that predate the model column (docs/database.md).
+        model = model or connection.model
         if not model:
             raise ApiError(
-                400, "invalid_request", "No model configured: pass 'model' or set a default"
+                400,
+                "invalid_request",
+                "No model configured: pass 'model' or set one on the connection",
             )
         prompt = custom_prompt or transcription_prompt_template(None)
         return Target(

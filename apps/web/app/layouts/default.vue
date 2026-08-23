@@ -9,17 +9,20 @@ import type { ComponentPublicInstance } from 'vue'
  * data column that scroll independently (docs/web.md § Design system). Nothing in the
  * signed-in app puts a whole screen on one scrollbar.
  *
- * The account row is a plain row, not a menu. Language lives on the sign-in footer — a
- * popover in the sidebar foot was three destinations behind one unlabelled disclosure.
+ * The account row is the signed-in home of the locale choice: the avatar-and-name button
+ * discloses a small popover holding the locale links (real links — the locale lives in
+ * the URL). Sign-out stays its own control beside it, never inside the popover
+ * (docs/web.md § Rules).
  *
  * Below 900px the rail collapses above the data region (each screen's own stylesheets do
  * that) and the sidebar becomes a drawer behind a menu button. No icon rail and no bottom
  * tab bar: the labels are doing the work, and a tab bar would spend the scarcest axis on a
  * phone.
  */
-const { t } = useI18n()
+const { t, locale, locales } = useI18n()
 const route = useRoute()
 const localePath = useLocalePath()
+const switchLocalePath = useSwitchLocalePath()
 const auth = useAuth()
 
 const NAV = [
@@ -32,8 +35,48 @@ const NAV = [
 
 /** The signed-in identity: the name when Google sent one, the address otherwise. */
 const account = computed(() => auth.me.value?.user.name?.trim() || auth.me.value?.user.email || '')
-/** The avatar glyph: the backend sends no picture, so the identity's first letter stands in. */
+/** The Google avatar; the identity's first letter stands in when there is none (dev
+ *  sign-in) or when the image fails to load. */
+const picture = computed(() => auth.me.value?.user.picture ?? null)
+const pictureFailed = ref(false)
+watch(picture, () => {
+  pictureFailed.value = false
+})
 const initial = computed(() => (account.value[0] ?? '?').toUpperCase())
+
+// --- the account popover: where the locale is chosen once signed in ----------
+
+const accountMenuOpen = ref(false)
+const accountMenu = ref<HTMLElement | null>(null)
+const accountButton = ref<HTMLElement | null>(null)
+
+// A locale link navigates; the route change is what closes the popover.
+watch(() => route.path, () => {
+  accountMenuOpen.value = false
+})
+
+function onAccountPointerDown(event: PointerEvent) {
+  if (!accountMenuOpen.value) return
+  const target = event.target as Node | null
+  if (accountMenu.value?.contains(target) || accountButton.value?.contains(target)) return
+  accountMenuOpen.value = false
+}
+
+function onAccountKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && accountMenuOpen.value) {
+    accountMenuOpen.value = false
+    accountButton.value?.focus()
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', onAccountPointerDown)
+  document.addEventListener('keydown', onAccountKeydown)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onAccountPointerDown)
+  document.removeEventListener('keydown', onAccountKeydown)
+})
 
 const sidebar = ref<HTMLElement | null>(null)
 /** A ref on a component yields its instance; `UiButton` with neither `to` nor `href` roots
@@ -141,14 +184,48 @@ async function signOut() {
         </NuxtLink>
       </nav>
 
-      <!-- Who is signed in, and the one control that ends it. Nothing else: a destination
-           hidden behind an account disclosure is a destination nobody finds. -->
+      <!-- Who is signed in: the avatar-and-name button discloses the locale popover, and
+           the one control that ends the session sits beside it, never inside. -->
       <div class="sidebar-foot">
-        <span class="avatar" aria-hidden="true">{{ initial }}</span>
+        <div v-if="accountMenuOpen" ref="accountMenu" class="account-menu">
+          <p class="account-menu-title eyebrow">{{ t('nav.language') }}</p>
+          <nav class="locales" :aria-label="t('nav.language')">
+            <NuxtLink
+              v-for="option in locales"
+              :key="option.code"
+              class="locale"
+              :class="{ active: option.code === locale }"
+              :to="switchLocalePath(option.code)"
+              :aria-current="option.code === locale ? 'true' : undefined"
+            >
+              {{ option.name }}
+            </NuxtLink>
+          </nav>
+        </div>
+
         <!-- Rendered even while `GET /api/me` is still in flight: the label is the row's
              only flexible track, and dropping it would slide the button across the foot the
              moment the identity arrives. -->
-        <span class="account-label" :title="account || undefined">{{ account }}</span>
+        <button
+          ref="accountButton"
+          type="button"
+          class="account"
+          :title="account || undefined"
+          aria-haspopup="true"
+          :aria-expanded="accountMenuOpen ? 'true' : 'false'"
+          @click="accountMenuOpen = !accountMenuOpen"
+        >
+          <img
+            v-if="picture && !pictureFailed"
+            class="avatar"
+            :src="picture"
+            alt=""
+            referrerpolicy="no-referrer"
+            @error="pictureFailed = true"
+          >
+          <span v-else class="avatar avatar-initial" aria-hidden="true">{{ initial }}</span>
+          <span class="account-label">{{ account }}</span>
+        </button>
         <button type="button" class="sign-out" :title="t('nav.signOut')" :aria-label="t('nav.signOut')" @click="signOut">
           <UiIcon name="sign-out" />
         </button>
@@ -302,14 +379,31 @@ async function signOut() {
   white-space: nowrap;
 }
 
-/* Pinned to the bottom, divided by a rule: the session's own row. */
+/* Pinned to the bottom, divided by a rule: the session's own row. The popover anchors
+   to it, so it owns a positioning context. */
 .sidebar-foot {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: auto;
   padding-top: var(--space-4);
   border-top: 1px solid var(--line-strong);
+}
+
+/* The disclosure: the avatar and name are one button, styled as the plain row they
+   replace — borderless, with the same hover shift the nav rows use. */
+.account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
 }
 
 .avatar {
@@ -321,6 +415,10 @@ async function signOut() {
   border: 1px solid var(--line-strong);
   border-radius: var(--radius-full);
   background: var(--paper);
+  object-fit: cover;
+}
+
+.avatar-initial {
   color: var(--faint);
   font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
@@ -334,6 +432,53 @@ async function signOut() {
   white-space: nowrap;
   font-size: var(--text-xs);
   color: var(--muted);
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.account:hover .account-label {
+  color: var(--ink);
+}
+
+/* Above the row it discloses from, on the panel surface. A border bounds it — the one
+   shadow stays reserved for dialogs and the drawer (docs/web.md § Design system). */
+.account-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + var(--space-2));
+  padding: var(--space-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--paper);
+}
+
+.account-menu-title {
+  margin: 0 0 var(--space-3);
+}
+
+.locales {
+  display: inline-flex;
+  gap: var(--space-5);
+}
+
+.locale {
+  color: var(--muted);
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.locale:hover {
+  color: var(--accent);
+}
+
+/* The same treatment as the sign-in footer: ink and a weight step, underlined in the
+   accent — the accent's one navigational use. */
+.locale.active {
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--accent);
 }
 
 /* Borderless and small — it sits in a row of text, not in a row of controls, so a bordered

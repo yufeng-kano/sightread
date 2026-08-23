@@ -99,7 +99,9 @@ async def callback(request: Request, db: DbSession, settings: AppSettings):
     if not claims.get("sub") or not claims.get("email"):
         raise ApiError(400, "auth", "Google sign-in returned no usable identity")
 
-    user = await upsert_user(db, claims["sub"], claims["email"], claims.get("name"))
+    user = await upsert_user(
+        db, claims["sub"], claims["email"], claims.get("name"), claims.get("picture")
+    )
     session_token = await create_session(db, user)
     await db.commit()
 
@@ -156,6 +158,7 @@ async def me(user: SessionUser, db: DbSession):
             "id": user.id,
             "email": user.email,
             "name": user.name,
+            "picture": user.picture,
             "created_at": user.created_at,
         },
         "settings": {
@@ -288,9 +291,12 @@ async def delete_openrouter_key(user: SessionUser, db: DbSession) -> Response:
 
 
 class ConnectionCreate(BaseModel):
+    """A connection is a complete profile — the model is fixed at creation (docs/api.md)."""
+
     name: str = Field(min_length=1, max_length=255)
     base_url: str = Field(min_length=1, max_length=1024)
     api_key: str = Field(min_length=8, max_length=512)
+    model: str = Field(min_length=1, max_length=255)
 
 
 class ConnectionUpdate(BaseModel):
@@ -299,6 +305,7 @@ class ConnectionUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     base_url: str | None = Field(default=None, min_length=1, max_length=1024)
     api_key: str | None = Field(default=None, min_length=8, max_length=512)
+    model: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 async def _commit_or_name_conflict(db: DbSession, message: str) -> None:
@@ -320,6 +327,7 @@ def _connection_payload(row: ProviderConnection) -> dict:
         "name": row.name,
         "base_url": row.base_url,
         "masked": row.masked,
+        "model": row.model,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -377,6 +385,9 @@ async def create_connection(
     name = body.name.strip()
     if not name:
         raise ApiError(400, "invalid_request", "The connection needs a name")
+    model = body.model.strip()
+    if not model:
+        raise ApiError(400, "invalid_request", "The connection needs a model")
     base_url = await normalize_base_url(body.base_url, settings.app_env)
     candidate = body.api_key.strip()
     await _refuse_duplicate_connection_name(db, user.id, name)
@@ -389,6 +400,7 @@ async def create_connection(
         base_url=base_url,
         ciphertext=encrypt_connection_key(settings.secret_key, candidate),
         masked=mask_openrouter_key(candidate),
+        model=model,
     )
     db.add(row)
     await _commit_or_name_conflict(db, "A connection with this name already exists")
@@ -429,6 +441,12 @@ async def update_connection(
             base_url, settings.secret_key, row.ciphertext, settings.upstream_response_max_bytes
         )
 
+    if "model" in provided and body.model:
+        model = body.model.strip()
+        if not model:
+            raise ApiError(400, "invalid_request", "The connection needs a model")
+        row.model = model
+
     row.name = name
     row.base_url = base_url
     row.updated_at = utcnow()
@@ -457,15 +475,38 @@ async def delete_connection(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/connections/{connection_id}/models")
-async def connection_models(
-    connection_id: int, user: SessionUser, db: DbSession, settings: AppSettings
+class ConnectionModelsPreview(BaseModel):
+    """The connection dialog's catalog request: a candidate key, or a stored one by id."""
+
+    base_url: str = Field(min_length=1, max_length=1024)
+    api_key: str | None = Field(default=None, min_length=8, max_length=512)
+    connection_id: int | None = None
+
+
+@router.post("/connections/preview-models", dependencies=[CsrfGuard])
+async def preview_connection_models(
+    body: ConnectionModelsPreview, user: SessionUser, db: DbSession, settings: AppSettings
 ):
-    """The connection's live model catalog, fetched with its stored key (docs/api.md)."""
-    row = await _owned_connection(db, user.id, connection_id)
-    models = await stored_connection_models(
-        row.base_url, settings.secret_key, row.ciphertext, settings.upstream_response_max_bytes
-    )
+    """The live model catalog the connection dialog picks from (docs/api.md).
+
+    Works before the connection exists (candidate `api_key`) and while editing one
+    (`connection_id` reuses the stored key, so editing never requires re-typing it). The
+    URL passes the same rules as saving — this must not be a free server-side probe
+    (docs/auth.md § 3).
+    """
+    base_url = await normalize_base_url(body.base_url, settings.app_env)
+    candidate = body.api_key.strip() if body.api_key else None
+    if candidate:
+        models = await fetch_connection_models(
+            base_url, candidate, settings.upstream_response_max_bytes
+        )
+    elif body.connection_id is not None:
+        row = await _owned_connection(db, user.id, body.connection_id)
+        models = await stored_connection_models(
+            base_url, settings.secret_key, row.ciphertext, settings.upstream_response_max_bytes
+        )
+    else:
+        raise ApiError(400, "invalid_request", "Provide an API key or an existing connection")
     return {"data": models}
 
 

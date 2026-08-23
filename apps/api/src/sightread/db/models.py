@@ -73,6 +73,8 @@ class User(Base):
     google_sub: Mapped[str] = mapped_column(String(255), unique=True)
     email: Mapped[str] = mapped_column(String(320))
     name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Google avatar URL, refreshed on each sign-in (docs/auth.md § 1).
+    picture: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
 
     settings: Mapped[UserSettings | None] = relationship(back_populates="user", lazy="selectin")
@@ -126,6 +128,10 @@ class ProviderConnection(Base):
 
     The connection's API key follows the OpenRouter key's rules exactly: AES-256-GCM
     ciphertext only, masked form for display, plaintext never stored (docs/auth.md § 3).
+
+    A connection is a complete profile: endpoint, key and model travel together. `model`
+    is required on creation and NULL only on rows that predate the column
+    (docs/database.md).
     """
 
     __tablename__ = "provider_connections"
@@ -139,6 +145,7 @@ class ProviderConnection(Base):
     base_url: Mapped[str] = mapped_column(String(1024))
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
     masked: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow, onupdate=utcnow)
 
