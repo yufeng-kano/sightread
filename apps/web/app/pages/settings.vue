@@ -21,7 +21,8 @@ import { modelLabel, sortModelsRecommendedFirst } from '~/lib/models'
 
 definePageMeta({ middleware: 'authed' })
 
-const { t, locale } = useI18n()
+const { t, locale, locales } = useI18n()
+const switchLocalePath = useSwitchLocalePath()
 useHead(() => ({ title: t('settings.headTitle') }))
 
 const auth = useAuth()
@@ -102,7 +103,14 @@ async function applyProvider(value: string) {
 
 // --- connection add/edit dialog ---------------------------------------------
 
-const connectionModal = ref<null | { mode: 'create' } | { mode: 'edit'; id: number }>(null)
+/**
+ * One dialog, three entry points. The pencil beside the provider picker is
+ * context-sensitive: on a custom connection it edits that connection, and on OpenRouter —
+ * which has no name or URL to edit — it opens the same dialog as a key-only form. Two
+ * separate dialogs for "change the credential of the selected provider" would be the same
+ * dialog twice.
+ */
+const connectionModal = ref<null | { mode: 'create' } | { mode: 'edit'; id: number } | { mode: 'key' }>(null)
 const connName = ref('')
 const connUrl = ref('')
 const connKey = ref('')
@@ -118,21 +126,74 @@ function openConnectionCreate() {
   connectionModal.value = { mode: 'create' }
 }
 
-function openConnectionEdit() {
+/** The pencil: edits the selected connection, or the OpenRouter key when that is what is
+ *  selected. OpenRouter is `providerChoice === ''` — a *missing* row means the connections
+ *  list has not answered yet, and treating that as OpenRouter would open the key dialog
+ *  over someone's selected connection. The button is disabled in that window anyway; this
+ *  is the second lock. */
+function openProviderEdit() {
+  connName.value = ''
+  connUrl.value = ''
+  connKey.value = ''
+  connError.value = null
+
+  if (providerChoice.value === '') {
+    keyInput.value = ''
+    keyError.value = null
+    connectionModal.value = { mode: 'key' }
+    return
+  }
   const row = selectedConnection.value
   if (!row) {
     return
   }
   connName.value = row.name
   connUrl.value = row.base_url
+  connectionModal.value = { mode: 'edit', id: row.id }
+}
+
+/**
+ * Closes the dialog and drops every draft it held — the key above all.
+ *
+ * The key-only mode edits the same `keyInput` the always-mounted API Key form below binds
+ * to, so a cancelled dialog would otherwise leave a typed credential sitting in a form the
+ * user can no longer see themselves having filled, one Save away from being submitted.
+ * Every close path goes through here: the button, the overlay, and Escape.
+ */
+function closeConnectionModal() {
+  connectionModal.value = null
+  connName.value = ''
+  connUrl.value = ''
   connKey.value = ''
   connError.value = null
-  connectionModal.value = { mode: 'edit', id: row.id }
+  keyInput.value = ''
+  keyError.value = null
+}
+
+/**
+ * What Escape, the overlay and Cancel do — as opposed to `closeConnectionModal`, which is
+ * how a *successful* save puts the dialog away.
+ *
+ * A save in flight refuses dismissal: those two paths bypass the disabled Cancel button,
+ * and a dialog dismissed mid-save can be reopened on a fresh draft that the original
+ * request's completion would then close, wiping a key the user had just typed.
+ */
+function dismissConnectionModal() {
+  if (connPending.value || keyPending.value) {
+    return
+  }
+  closeConnectionModal()
 }
 
 async function submitConnection() {
   const modal = connectionModal.value
   if (!modal || connPending.value) {
+    return
+  }
+  // The key-only mode writes the OpenRouter key, which has its own endpoint and its own
+  // validation — it is the same dialog, not the same request.
+  if (modal.mode === 'key') {
+    await saveOpenRouterKey(closeConnectionModal)
     return
   }
   connPending.value = true
@@ -144,7 +205,7 @@ async function submitConnection() {
         base_url: connUrl.value.trim(),
         api_key: connKey.value.trim(),
       })
-      connectionModal.value = null
+      closeConnectionModal()
       await refreshConnections()
       // A freshly added provider is what the user came to use — select it right away.
       await applyProvider(String(created.id))
@@ -154,7 +215,7 @@ async function submitConnection() {
         base_url: connUrl.value.trim(),
         ...(connKey.value.trim() ? { api_key: connKey.value.trim() } : {}),
       })
-      connectionModal.value = null
+      closeConnectionModal()
       await refreshConnections()
       connectionModels.value = null
       await loadConnectionModels()
@@ -347,23 +408,38 @@ const keyError = ref<string | null>(null)
 const keyMessage = ref<string | null>(null)
 const confirmingDelete = ref(false)
 
-async function saveOpenRouterKey() {
+/**
+ * Saves the stored OpenRouter key. `onSaved` is what the key-only dialog passes to close
+ * itself, so the dialog stays open — with the error shown in it — when the backend refuses
+ * the key.
+ */
+async function saveOpenRouterKey(onSaved?: () => void) {
   const candidate = keyInput.value.trim()
   if (!candidate || keyPending.value) {
     return
   }
   keyPending.value = true
   keyError.value = null
+  connError.value = null
   keyMessage.value = null
+  let saved = false
   try {
     await putOpenRouterKey(candidate)
     keyInput.value = ''
     keyMessage.value = t('settings.openrouterSaved')
     await auth.refresh()
+    saved = true
   } catch (error) {
-    keyError.value = await resolve(error)
+    const message = await resolve(error)
+    keyError.value = message
+    connError.value = message
   } finally {
     keyPending.value = false
+  }
+  // After the flag clears, never inside the `try`: the callback closes the dialog, and a
+  // dialog cannot be put away while its own save still reads as pending.
+  if (saved) {
+    onSaved?.()
   }
 }
 
@@ -381,6 +457,46 @@ async function removeOpenRouterKey() {
     keyPending.value = false
   }
 }
+
+// --- the rail's live summary -------------------------------------------------
+
+/**
+ * What is in effect right now, as three lines in the rail. It reads the same state the
+ * controls on the right write, so it changes as they do — that is the point of putting it
+ * opposite them rather than under each group as a "currently: …" line.
+ */
+const summaryProvider = computed(() => {
+  // Same rule as the controls: a *missing* row is a connections list that has not answered,
+  // not OpenRouter. Reporting configuration the backend never returned is exactly the
+  // fabrication the rail is here to avoid.
+  if (providerUnresolved.value) {
+    return t('common.loading')
+  }
+  return selectedConnection.value?.name ?? t('settings.providerOpenRouter')
+})
+
+const summaryModel = computed(() => {
+  if (providerUnresolved.value) {
+    return t('common.loading')
+  }
+  if (selectedConnection.value) {
+    return connectionModelChoice.value || t('common.notSet')
+  }
+  if (selection.value.startsWith('model:')) {
+    return selection.value.slice('model:'.length)
+  }
+  if (selection.value.startsWith('profile:')) {
+    const id = selection.value.slice('profile:'.length)
+    const profile = catalog.value?.profiles.find((entry) => entry.id === id)
+    if (profile) {
+      return profile.model ?? profile.name
+    }
+    // A stored profile the catalog has not described yet. "Not set" here would be the same
+    // fabrication as calling an unresolved provider OpenRouter: a choice *is* stored.
+    return t('common.loading')
+  }
+  return t('common.notSet')
+})
 
 // --- prompt presets ---------------------------------------------------------
 
@@ -412,6 +528,19 @@ watch(
 const selectedPrompt = computed(
   () => prompts.value.find((row) => String(row.id) === promptChoice.value) ?? null,
 )
+
+/** Same rule again: a stored preset whose row has not arrived is unresolved, not the
+ *  default prompt. */
+const promptUnresolved = computed(
+  () => promptChoice.value !== '' && selectedPrompt.value === null,
+)
+
+const summaryPrompt = computed(() => {
+  if (promptUnresolved.value) {
+    return t('common.loading')
+  }
+  return selectedPrompt.value?.name ?? t('settings.promptDefaultOption')
+})
 
 async function applyPromptChoice(value: string) {
   const previous = promptChoice.value
@@ -506,166 +635,213 @@ async function removePrompt() {
   }
 }
 </script>
-
 <template>
-  <div class="page">
-    <UiPageHeader :title="t('settings.headTitle')" />
+  <UiScreen>
+    <UiRail>
+      <UiPageHeader :eyebrow="t('settings.eyebrow')" :title="t('settings.headTitle')" />
 
-    <div class="stack">
-      <UiCard :title="t('settings.providerTitle')">
-        <div class="section">
-          <UiBanner v-if="connectionsError" tone="error">{{ connectionsError }}</UiBanner>
-
-          <div class="control-row">
-            <UiField v-slot="{ id }" class="grow" :label="t('settings.providerLabel')">
-              <UiSelect
-                :id="id"
-                :model-value="providerChoice"
-                :disabled="targetBusy"
-                @update:model-value="applyProvider"
-              >
-                <option value="">{{ t('settings.providerOpenRouter') }}</option>
-                <option v-for="row in connections" :key="row.id" :value="String(row.id)">
-                  {{ row.name }}
-                </option>
-              </UiSelect>
-            </UiField>
-
-            <UiButton :disabled="providerPending" @click="openConnectionCreate">
-              <template #icon><UiIcon name="plus" /></template>
-              {{ t('settings.addProvider') }}
-            </UiButton>
-          </div>
-
-          <template v-if="selectedConnection">
-            <p class="state">
-              {{
-                t('settings.connectionState', {
-                  url: selectedConnection.base_url,
-                  masked: selectedConnection.masked,
-                })
-              }}
-            </p>
-            <div class="control-row">
-              <UiButton :disabled="connPending" @click="openConnectionEdit">
-                <template #icon><UiIcon name="edit" /></template>
-                {{ t('common.edit') }}
-              </UiButton>
-              <UiButton
-                variant="danger"
-                :disabled="connPending"
-                @click="confirmingConnectionDelete = true"
-              >
-                <template #icon><UiIcon name="trash" /></template>
-                {{ t('settings.connectionDelete') }}
-              </UiButton>
-            </div>
-          </template>
-
-          <UiBanner v-if="providerError" tone="error">{{ providerError }}</UiBanner>
-          <UiBanner v-else-if="providerMessage" tone="ok">{{ providerMessage }}</UiBanner>
+      <!-- What is in effect, opposite the controls that set it. It updates as they do. -->
+      <dl class="summary">
+        <div class="summary-row">
+          <dt class="eyebrow">{{ t('settings.providerTitle') }}</dt>
+          <dd>{{ summaryProvider }}</dd>
         </div>
-      </UiCard>
-
-      <UiCard
-        v-if="!selectedConnection && !providerUnresolved"
-        :title="t('settings.openrouterTitle')"
-      >
-        <div class="section">
-          <!-- Only the stored state is worth a line. Absence explains itself: the field is
-               empty and asks to be filled. -->
-          <p v-if="openrouterKey?.present && openrouterKey.updated_at" class="state">
-            {{
-              t('settings.openrouterStored', {
-                masked: openrouterKey.masked,
-                updated: formatDateTime(openrouterKey.updated_at, locale),
-              })
-            }}
-          </p>
-
-          <form class="control-row" @submit.prevent="saveOpenRouterKey">
-            <UiField v-slot="{ id }" class="grow" :label="t('settings.openrouterLabel')">
-              <UiTextInput
-                :id="id"
-                v-model="keyInput"
-                type="password"
-                autocomplete="off"
-                required
-              />
-            </UiField>
-            <UiButton
-              variant="primary"
-              type="submit"
-              :loading="keyPending"
-              :disabled="!keyInput.trim()"
-            >
-              {{ t('common.save') }}
-            </UiButton>
-            <!-- Keeps its word: it destroys a credential the user has to fetch from OpenRouter
-                 again, which is not something a bare glyph should be able to do. -->
-            <UiButton
-              v-if="openrouterKey?.present"
-              variant="danger"
-              :disabled="keyPending"
-              @click="confirmingDelete = true"
-            >
-              <template #icon><UiIcon name="trash" /></template>
-              {{ t('settings.openrouterDelete') }}
-            </UiButton>
-          </form>
-
-          <UiBanner v-if="keyError" tone="error">{{ keyError }}</UiBanner>
-          <UiBanner v-else-if="keyMessage" tone="ok">{{ keyMessage }}</UiBanner>
+        <div class="summary-row">
+          <dt class="eyebrow">{{ t('settings.summaryModel') }}</dt>
+          <dd class="mono">{{ summaryModel }}</dd>
         </div>
-      </UiCard>
+        <div class="summary-row last">
+          <dt class="eyebrow">{{ t('settings.summaryPrompt') }}</dt>
+          <dd>{{ summaryPrompt }}</dd>
+        </div>
+      </dl>
+    </UiRail>
 
-      <UiCard :title="t('settings.defaultsTitle')">
-        <div class="section">
-          <!-- A selected connection whose row has not arrived (list failed or loading)
-               must not fall through to the OpenRouter controls. -->
-          <UiSkeleton v-if="providerUnresolved" :rows="2" />
+    <UiRegion>
+      <UiPanel section>
+        <div class="groups">
+          <!-- Provider ------------------------------------------------------ -->
+          <section class="group">
+            <h2 class="group-title">{{ t('settings.providerTitle') }}</h2>
 
-          <!-- Model choice on a custom connection: its own live catalog, default prompts.
-               The error banner renders beside the last good catalog, never instead of it —
-               a failed refresh keeps its data (docs/web.md). -->
-          <template v-if="selectedConnection">
-            <UiBanner v-if="connectionModelsError" tone="error">
-              {{ connectionModelsError }}
+            <UiBanner v-if="connectionsError" class="group-banner" tone="error">
+              {{ connectionsError }}
             </UiBanner>
-            <UiSkeleton v-if="connectionModelsPending && !connectionModels" :rows="2" />
 
-            <div v-if="connectionModels" class="control-row">
-              <UiField v-slot="{ id }" class="grow" :label="t('settings.connectionModelLabel')">
+            <div class="controls">
+              <UiField v-slot="{ id }" class="grow" :label="t('settings.providerLabel')" label-hidden>
                 <UiSelect
                   :id="id"
-                  :model-value="connectionModelChoice"
+                  :model-value="providerChoice"
                   :disabled="targetBusy"
-                  @update:model-value="applyConnectionModel"
+                  @update:model-value="applyProvider"
                 >
-                  <option value="">{{ t('common.notSet') }}</option>
-                  <option v-for="model in connectionModels ?? []" :key="model.id" :value="model.id">
-                    {{ model.name ? `${model.name} · ${model.id}` : model.id }}
+                  <option value="">{{ t('settings.providerOpenRouter') }}</option>
+                  <option v-for="row in connections" :key="row.id" :value="String(row.id)">
+                    {{ row.name }}
                   </option>
                 </UiSelect>
               </UiField>
-              <UiButton
-                :disabled="connectionModelsPending"
-                :label="t('common.refresh')"
-                @click="loadConnectionModels"
-              >
-                <template #icon><UiIcon name="refresh" /></template>
-              </UiButton>
+
+              <!-- Kept on one line beside the picker: at a wider basis the two buttons wrap
+                   onto a line of their own and stop reading as this control's actions. -->
+              <div class="control-buttons">
+                <UiButton
+                  icon-only
+                  :label="t('settings.addProvider')"
+                  :disabled="providerPending"
+                  @click="openConnectionCreate"
+                >
+                  <template #icon><UiIcon name="plus" /></template>
+                </UiButton>
+                <UiButton
+                  icon-only
+                  :label="
+                    providerChoice === ''
+                      ? t('settings.keyDialogTitle')
+                      : t('settings.connectionEditTitle')
+                  "
+                  :disabled="providerPending || connPending || keyPending || providerUnresolved"
+                  @click="openProviderEdit"
+                >
+                  <template #icon><UiIcon name="edit" /></template>
+                </UiButton>
+              </div>
             </div>
-            <p class="custom-note">{{ t('settings.connectionModelNote') }}</p>
-          </template>
 
-          <!-- Model choice on OpenRouter: preset profiles + at most one custom model. -->
-          <template v-else-if="!providerUnresolved">
-            <UiBanner v-if="catalogError" tone="error">{{ catalogError }}</UiBanner>
-            <UiSkeleton v-else-if="!catalog" :rows="2" />
+            <!-- A custom connection carries its own address, its own catalog and its own
+                 deletion. None of that exists for OpenRouter. -->
+            <template v-if="selectedConnection">
+              <p class="state">
+                {{
+                  t('settings.connectionState', {
+                    url: selectedConnection.base_url,
+                    masked: selectedConnection.masked,
+                  })
+                }}
+              </p>
 
-            <div v-else class="control-row">
-              <UiField v-slot="{ id }" class="grow" :label="t('settings.defaultLabel')">
+              <!-- With no retry here a transient /models failure leaves the picker gone
+                   for good: nothing else calls this until the selected connection changes,
+                   and switching away clears the stored model. -->
+              <UiBanner v-if="connectionModelsError" class="group-banner" tone="error">
+                {{ connectionModelsError }}
+                <template #actions>
+                  <UiButton
+                    size="sm"
+                    :loading="connectionModelsPending"
+                    @click="loadConnectionModels"
+                  >
+                    <template #icon><UiIcon name="refresh" /></template>
+                    {{ t('common.retry') }}
+                  </UiButton>
+                </template>
+              </UiBanner>
+              <UiSkeleton v-if="connectionModelsPending && !connectionModels" :rows="1" />
+
+              <div class="controls">
+                <UiField
+                  v-if="connectionModels"
+                  v-slot="{ id }"
+                  class="grow"
+                  :label="t('settings.connectionModelLabel')"
+                  label-hidden
+                >
+                  <UiSelect
+                    :id="id"
+                    :model-value="connectionModelChoice"
+                    :disabled="targetBusy"
+                    @update:model-value="applyConnectionModel"
+                  >
+                    <option value="">{{ t('common.notSet') }}</option>
+                    <option v-for="model in connectionModels ?? []" :key="model.id" :value="model.id">
+                      {{ model.name ? `${model.name} · ${model.id}` : model.id }}
+                    </option>
+                  </UiSelect>
+                </UiField>
+                <UiButton
+                  v-if="connectionModels"
+                  icon-only
+                  :label="t('settings.connectionModelReload')"
+                  :loading="connectionModelsPending"
+                  @click="loadConnectionModels"
+                >
+                  <template #icon><UiIcon name="refresh" /></template>
+                </UiButton>
+                <UiButton
+                  variant="danger"
+                  :disabled="connPending"
+                  @click="confirmingConnectionDelete = true"
+                >
+                  {{ t('settings.connectionDelete') }}
+                </UiButton>
+              </div>
+            </template>
+
+            <UiBanner v-if="providerError" class="group-banner" tone="error">{{ providerError }}</UiBanner>
+            <UiBanner v-else-if="providerMessage" class="group-banner" tone="ok">{{ providerMessage }}</UiBanner>
+          </section>
+
+          <!-- API key — OpenRouter only. A connection's key lives in its dialog. --------- -->
+          <section v-if="!selectedConnection && !providerUnresolved" class="group">
+            <h2 class="group-title">{{ t('settings.keyDialogTitle') }}</h2>
+
+            <!-- Only the stored state is worth a line. Absence explains itself: the field is
+                 empty and asks to be filled. -->
+            <p v-if="openrouterKey?.present && openrouterKey.updated_at" class="state">
+              {{
+                t('settings.openrouterStored', {
+                  masked: openrouterKey.masked,
+                  updated: formatDateTime(openrouterKey.updated_at, locale),
+                })
+              }}
+            </p>
+
+            <form class="controls" @submit.prevent="saveOpenRouterKey()">
+              <UiField v-slot="{ id }" class="grow" :label="t('settings.openrouterLabel')">
+                <UiTextInput
+                  :id="id"
+                  v-model="keyInput"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="t('settings.openrouterPlaceholder')"
+                  required
+                />
+              </UiField>
+              <UiButton
+                variant="primary"
+                type="submit"
+                :loading="keyPending"
+                :disabled="!keyInput.trim()"
+              >
+                {{ t('common.save') }}
+              </UiButton>
+              <!-- Keeps its word: it destroys a credential the user has to fetch from
+                   OpenRouter again, which is not something a bare glyph should be able to do. -->
+              <UiButton
+                v-if="openrouterKey?.present"
+                variant="danger"
+                :disabled="keyPending"
+                @click="confirmingDelete = true"
+              >
+                {{ t('settings.openrouterDelete') }}
+              </UiButton>
+            </form>
+
+            <UiBanner v-if="keyError" class="group-banner" tone="error">{{ keyError }}</UiBanner>
+            <UiBanner v-else-if="keyMessage" class="group-banner" tone="ok">{{ keyMessage }}</UiBanner>
+          </section>
+
+          <!-- Parsing default — OpenRouter only, mirroring the mutual exclusivity between
+               preset profiles and a connection's own model list. ------------------------- -->
+          <section v-if="!selectedConnection && !providerUnresolved" class="group">
+            <h2 class="group-title">{{ t('settings.defaultsTitle') }}</h2>
+
+            <UiBanner v-if="catalogError" class="group-banner" tone="error">{{ catalogError }}</UiBanner>
+            <UiSkeleton v-else-if="!catalog" :rows="1" />
+
+            <div v-else class="controls">
+              <UiField v-slot="{ id }" class="grow" :label="t('settings.defaultLabel')" label-hidden>
                 <UiSelect
                   :id="id"
                   :model-value="selection"
@@ -698,91 +874,129 @@ async function removePrompt() {
                 {{ t('settings.addCustom') }}
               </UiButton>
             </div>
-          </template>
 
-          <UiBanner v-if="defaultsError" tone="error">{{ defaultsError }}</UiBanner>
-          <UiBanner v-else-if="defaultsMessage" tone="ok">{{ defaultsMessage }}</UiBanner>
-        </div>
-      </UiCard>
+            <UiBanner v-if="defaultsError" class="group-banner" tone="error">{{ defaultsError }}</UiBanner>
+            <UiBanner v-else-if="defaultsMessage" class="group-banner" tone="ok">{{ defaultsMessage }}</UiBanner>
+          </section>
 
-      <UiCard :title="t('settings.promptTitle')">
-        <div class="section">
-          <UiBanner v-if="promptsError" tone="error">{{ promptsError }}</UiBanner>
+          <!-- A selected connection whose row has not arrived (list failed or loading) must
+               not fall through to the OpenRouter controls. -->
+          <UiSkeleton v-if="providerUnresolved" :rows="2" />
 
-          <p class="state">
-            {{
-              selectedPrompt
-                ? t('settings.promptStateCustom', { name: selectedPrompt.name })
-                : t('settings.promptStateDefault')
-            }}
-          </p>
+          <!-- System prompt ------------------------------------------------- -->
+          <section class="group">
+            <h2 class="group-title">{{ t('settings.promptTitle') }}</h2>
 
-          <div class="control-row">
-            <UiField v-slot="{ id }" class="grow" :label="t('settings.promptLabel')">
-              <UiSelect
-                :id="id"
-                :model-value="promptChoice"
+            <UiBanner v-if="promptsError" class="group-banner" tone="error">{{ promptsError }}</UiBanner>
+
+            <div class="controls">
+              <UiField v-slot="{ id }" class="grow" :label="t('settings.promptLabel')" label-hidden>
+                <UiSelect
+                  :id="id"
+                  :model-value="promptChoice"
+                  :disabled="promptPending"
+                  @update:model-value="applyPromptChoice"
+                >
+                  <option value="">{{ t('settings.promptDefaultOption') }}</option>
+                  <option v-for="row in prompts" :key="row.id" :value="String(row.id)">
+                    {{ row.name }}
+                  </option>
+                </UiSelect>
+              </UiField>
+
+              <UiButton :disabled="promptPending" @click="openPromptCreate">
+                <template #icon><UiIcon name="plus" /></template>
+                {{ t('settings.promptAdd') }}
+              </UiButton>
+              <UiButton
+                v-if="selectedPrompt"
+                icon-only
+                :label="t('settings.promptEditTitle')"
                 :disabled="promptPending"
-                @update:model-value="applyPromptChoice"
+                @click="openPromptEdit"
               >
-                <option value="">{{ t('settings.promptDefaultOption') }}</option>
-                <option v-for="row in prompts" :key="row.id" :value="String(row.id)">
-                  {{ row.name }}
-                </option>
-              </UiSelect>
-            </UiField>
+                <template #icon><UiIcon name="edit" /></template>
+              </UiButton>
+              <UiButton
+                v-if="selectedPrompt"
+                variant="danger"
+                :disabled="promptPending"
+                @click="confirmingPromptDelete = true"
+              >
+                {{ t('settings.promptDelete') }}
+              </UiButton>
+            </div>
 
-            <UiButton :disabled="promptPending" @click="openPromptCreate">
-              <template #icon><UiIcon name="plus" /></template>
-              {{ t('settings.promptAdd') }}
-            </UiButton>
-            <UiButton v-if="selectedPrompt" :disabled="promptPending" @click="openPromptEdit">
-              <template #icon><UiIcon name="edit" /></template>
-              {{ t('common.edit') }}
-            </UiButton>
-            <UiButton
-              v-if="selectedPrompt"
-              variant="danger"
-              :disabled="promptPending"
-              @click="confirmingPromptDelete = true"
-            >
-              <template #icon><UiIcon name="trash" /></template>
-              {{ t('settings.promptDelete') }}
-            </UiButton>
-          </div>
+            <UiBanner v-if="promptError" class="group-banner" tone="error">{{ promptError }}</UiBanner>
+            <UiBanner v-else-if="promptMessage" class="group-banner" tone="ok">{{ promptMessage }}</UiBanner>
+          </section>
 
-          <p class="custom-note">{{ t('settings.promptNote') }}</p>
-
-          <UiBanner v-if="promptError" tone="error">{{ promptError }}</UiBanner>
-          <UiBanner v-else-if="promptMessage" tone="ok">{{ promptMessage }}</UiBanner>
+          <!-- Language --------------------------------------------------- -->
+          <!--
+            The signed-in home for the locale choice. The sign-in footer is where a visitor
+            picks it, but that page is unreachable once you are in, and the shell's account
+            popover — which used to carry this — is gone. Real links, since the locale lives
+            in the URL and the choice should stay bookmarkable.
+          -->
+          <section class="group">
+            <h2 class="group-title">{{ t('nav.language') }}</h2>
+            <nav class="locales" :aria-label="t('nav.language')">
+              <NuxtLink
+                v-for="option in locales"
+                :key="option.code"
+                class="locale"
+                :class="{ active: option.code === locale }"
+                :to="switchLocalePath(option.code)"
+                :aria-current="option.code === locale ? 'true' : undefined"
+              >
+                {{ option.name }}
+              </NuxtLink>
+            </nav>
+          </section>
         </div>
-      </UiCard>
-    </div>
-
+      </UiPanel>
+    </UiRegion>
+    <!-- One dialog, three titles: a new connection, an existing one, or the OpenRouter key
+         on its own. Name and Base URL only exist for a connection. -->
     <UiModal
       v-if="connectionModal"
+      size="md"
       :title="
         connectionModal.mode === 'create'
           ? t('settings.connectionCreateTitle')
-          : t('settings.connectionEditTitle')
+          : connectionModal.mode === 'edit'
+            ? t('settings.connectionEditTitle')
+            : t('settings.keyDialogTitle')
       "
-      @close="connectionModal = null"
+      @close="dismissConnectionModal"
     >
       <form id="connection-form" class="modal-form" @submit.prevent="submitConnection">
-        <UiField v-slot="{ id }" :label="t('settings.connectionNameLabel')">
-          <UiTextInput :id="id" v-model="connName" required />
-        </UiField>
-        <UiField v-slot="{ id }" :label="t('settings.connectionUrlLabel')">
-          <UiTextInput
-            :id="id"
-            v-model="connUrl"
-            :placeholder="t('settings.connectionUrlPlaceholder')"
-            required
-          />
-        </UiField>
-        <p class="custom-note">{{ t('settings.connectionUrlNote') }}</p>
+        <template v-if="connectionModal.mode !== 'key'">
+          <UiField v-slot="{ id }" :label="t('settings.connectionNameLabel')">
+            <UiTextInput :id="id" v-model="connName" required />
+          </UiField>
+          <UiField v-slot="{ id }" :label="t('settings.connectionUrlLabel')">
+            <UiTextInput
+              :id="id"
+              v-model="connUrl"
+              :placeholder="t('settings.connectionUrlPlaceholder')"
+              required
+            />
+          </UiField>
+        </template>
+
         <UiField v-slot="{ id }" :label="t('settings.connectionKeyLabel')">
           <UiTextInput
+            v-if="connectionModal.mode === 'key'"
+            :id="id"
+            v-model="keyInput"
+            type="password"
+            autocomplete="off"
+            :placeholder="t('settings.openrouterPlaceholder')"
+            required
+          />
+          <UiTextInput
+            v-else
             :id="id"
             v-model="connKey"
             type="password"
@@ -790,21 +1004,30 @@ async function removePrompt() {
             :required="connectionModal.mode === 'create'"
           />
         </UiField>
-        <p v-if="connectionModal.mode === 'edit'" class="custom-note">
+
+        <p v-if="connectionModal.mode === 'edit'" class="note">
           {{ t('settings.connectionKeyKeepNote') }}
         </p>
+        <p v-if="connectionModal.mode !== 'key'" class="note">{{ t('settings.connectionUrlNote') }}</p>
+
         <UiBanner v-if="connError" tone="error">{{ connError }}</UiBanner>
       </form>
       <template #footer>
-        <UiButton variant="ghost" :disabled="connPending" @click="connectionModal = null">
+        <UiButton variant="ghost" :disabled="connPending || keyPending" @click="dismissConnectionModal">
           {{ t('common.cancel') }}
         </UiButton>
         <UiButton
           variant="primary"
           type="submit"
           form="connection-form"
-          :loading="connPending"
-          :disabled="!connName.trim() || !connUrl.trim() || (connectionModal.mode === 'create' && !connKey.trim())"
+          :loading="connPending || keyPending"
+          :disabled="
+            connectionModal.mode === 'key'
+              ? !keyInput.trim()
+              : !connName.trim() ||
+                !connUrl.trim() ||
+                (connectionModal.mode === 'create' && !connKey.trim())
+          "
         >
           {{ t('common.save') }}
         </UiButton>
@@ -813,6 +1036,7 @@ async function removePrompt() {
 
     <UiModal
       v-if="promptModal"
+      size="md"
       :title="
         promptModal.mode === 'create' ? t('settings.promptCreateTitle') : t('settings.promptEditTitle')
       "
@@ -832,7 +1056,9 @@ async function removePrompt() {
             :disabled="promptModalPending"
           />
         </UiField>
-        <p class="custom-note">{{ t('settings.promptNote') }}</p>
+        <!-- The placeholders and what a custom prompt overrides belong here, beside the text
+             being written — not on the settings page, where they explained a dropdown. -->
+        <p class="note">{{ t('settings.promptNote') }}</p>
         <UiBanner v-if="promptModalError" tone="error">{{ promptModalError }}</UiBanner>
       </form>
       <template #footer>
@@ -851,7 +1077,7 @@ async function removePrompt() {
       </template>
     </UiModal>
 
-    <UiModal v-if="addingCustom" :title="t('settings.customTitle')" @close="addingCustom = false">
+    <UiModal v-if="addingCustom" size="md" :title="t('settings.customTitle')" @close="addingCustom = false">
       <form id="custom-model" class="modal-form" @submit.prevent="submitCustom">
         <UiField v-slot="{ id }" :label="t('settings.customModelLabel')">
           <UiSelect :id="id" v-model="customChoice">
@@ -868,18 +1094,13 @@ async function removePrompt() {
             </optgroup>
           </UiSelect>
         </UiField>
-        <p class="custom-note">{{ t('settings.customNote') }}</p>
+        <p class="note">{{ t('settings.customNote') }}</p>
       </form>
       <template #footer>
         <UiButton variant="ghost" :disabled="defaultsPending" @click="addingCustom = false">
           {{ t('common.cancel') }}
         </UiButton>
-        <UiButton
-          variant="primary"
-          type="submit"
-          form="custom-model"
-          :disabled="!customChoice"
-        >
+        <UiButton variant="primary" type="submit" form="custom-model" :disabled="!customChoice">
           {{ t('settings.customUse') }}
         </UiButton>
       </template>
@@ -914,40 +1135,135 @@ async function removePrompt() {
       @confirm="removePrompt"
       @cancel="confirmingPromptDelete = false"
     />
-  </div>
+  </UiScreen>
 </template>
 
 <style scoped>
-/* No gap on the page itself: UiPageHeader carries its own bottom margin. Forms also read
-   better in a column than stretched across a desktop's full width — the tables on the other
-   pages are what --content-max is for. */
-.page {
+/* --- Rail ----------------------------------------------------------------- */
+
+.summary {
   display: flex;
   flex-direction: column;
-  max-width: 56rem;
-  width: 100%;
+  margin: 0;
 }
 
-.stack {
+.summary-row {
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--line);
+}
+
+.summary-row.last {
+  border-bottom: 1px solid var(--line);
+}
+
+.summary-row dd {
+  margin: var(--space-2) 0 0;
+  color: var(--ink);
+  font-size: var(--text-base);
+  overflow-wrap: anywhere;
+}
+
+.summary-row dd.mono {
+  font-size: var(--text-xs);
+}
+
+/* --- Groups --------------------------------------------------------------- */
+
+/* A reading column, not the region's full width: these are forms, and a control row
+   stretched across a desktop puts its button a screen away from its field. */
+.groups {
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-10);
+  max-width: 52rem;
 }
 
-.section {
-  display: grid;
+.group {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-4);
 }
 
+/* The rule under a heading is what bounds the group — there is no card to do it. */
+.group-title {
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--hair);
+  font-size: var(--display-sm);
+  letter-spacing: normal;
+}
+
+/*
+ * One row of controls that are all the same height. The fields render label-less here, so
+ * the row aligns on its baseline edge and every control's height comes from
+ * `--control-height` — nothing here re-states a pixel value.
+ */
+.controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+/* 12rem, not 18rem: at the wider basis the icon buttons beside the picker wrapped to a line
+   of their own on a normal laptop. */
+.grow {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.control-buttons {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+}
+
 .state {
-  color: var(--text-secondary);
+  color: var(--muted);
   max-width: 72ch;
   overflow-wrap: anywhere;
 }
 
+.group-banner {
+  max-width: 72ch;
+}
+
+.locales {
+  display: inline-flex;
+  gap: var(--space-5);
+}
+
+.locale {
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.locale:hover {
+  color: var(--accent);
+}
+
+/* The same treatment as the sign-in footer: ink and a weight step, underlined in the
+   accent — the accent's one navigational use. */
+.locale.active {
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--accent);
+}
+
+/* --- Dialogs -------------------------------------------------------------- */
+
 .modal-form {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-4);
+}
+
+.note {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  max-width: 60ch;
 }
 
 /* Same skin as UiTextInput's `.control`, sized for a prompt instead of one line. */
@@ -955,58 +1271,26 @@ async function removePrompt() {
   width: 100%;
   min-width: 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
   font-family: var(--mono);
   font-size: var(--text-xs);
   line-height: 1.6;
   resize: vertical;
-  outline: none;
-  transition:
-    border-color var(--duration-fast) var(--ease),
-    box-shadow var(--duration-fast) var(--ease);
-}
-
-.prompt-input:focus {
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-  outline: none;
+  transition: border-color var(--duration-fast) var(--ease);
 }
 
 .prompt-input:disabled {
-  background: var(--surface-2);
+  background: var(--paper-sunken);
   color: var(--muted);
   cursor: not-allowed;
 }
 
 @media (pointer: coarse) {
   .prompt-input {
-    font-size: var(--text-md);
+    font-size: 16px;
   }
-}
-
-.custom-note {
-  color: var(--muted);
-  font-size: var(--text-sm);
-  max-width: 60ch;
-}
-
-/*
- * One row of controls that are all the same height: the fields' labels sit above them, so
- * the row aligns on its baseline edge and the buttons meet the bottom of the inputs. Every
- * control's height comes from --control-height, so nothing here re-states a pixel value.
- */
-.control-row {
-  display: flex;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
-
-.grow {
-  flex: 1 1 18rem;
-  min-width: 0;
 }
 </style>

@@ -1,14 +1,17 @@
 <!--
   The one place table markup lives.
 
-  Three things a page's own `<table>` reliably gets wrong, all handled here:
+  What a page's own `<table>` reliably gets wrong, all handled here:
 
-  1. Sticky header — the column names stay while the body scrolls inside its card, which is
-     what lets a long table live in a bounded region instead of growing the page.
-  2. Alignment — numeric columns are centered with tabular numerals, header and cells
+  1. It scrolls in place. The table carries a `min-width` and never wraps a cell, so a
+     narrow region gives it a horizontal scrollbar inside its panel instead of squeezing
+     columns until the row rhythm breaks.
+  2. Sticky header — the column names stay while the body scrolls inside its panel, on an
+     inset rule rather than a border (a sticky cell's border scrolls away from the cell).
+  3. Alignment — numeric columns are right-aligned with tabular numerals, header and cells
      together, declared once per column rather than re-specified per cell.
-  3. Mobile — below 768px each row becomes a card of label/value pairs. Horizontal scroll on
-     a phone hides exactly the columns that matter, so that is not the fallback.
+  4. Rhythm — the first column sits flush with the panel's gutter and every column after it
+     takes the same left padding, so the eye has one left edge per column.
 
   Cells render through a per-column slot named `cell-<key>`, falling back to the column's
   `value()`.
@@ -16,19 +19,24 @@
 <script setup lang="ts" generic="Row">
 import type { TableColumn } from '~/lib/table'
 
-defineProps<{
-  columns: TableColumn<Row>[]
-  rows: Row[]
-  rowKey: (row: Row) => string
-  /** Accessible caption. Visually hidden — the card head carries the visible title. */
-  caption: string
-}>()
+withDefaults(
+  defineProps<{
+    columns: TableColumn<Row>[]
+    rows: Row[]
+    rowKey: (row: Row) => string
+    /** Accessible caption. Visually hidden — the panel header carries the visible title. */
+    caption: string
+    /** `tight` is the usage tables' denser row; `normal` is jobs and keys. */
+    density?: 'normal' | 'tight'
+  }>(),
+  { density: 'normal' },
+)
 
 defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 </script>
 
 <template>
-  <table class="table">
+  <table class="table" :class="density">
     <caption class="sr-only">{{ caption }}</caption>
     <thead>
       <tr>
@@ -36,7 +44,7 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
           v-for="column in columns"
           :key="column.key"
           scope="col"
-          :class="{ numeric: column.numeric, end: column.align === 'end', 'hide-mobile': column.hideOnMobile }"
+          :class="{ numeric: column.numeric, end: column.align === 'end' }"
           :style="column.width ? { width: column.width } : undefined"
         >
           <span v-if="!column.header && column.srHeader" class="sr-only">{{ column.srHeader }}</span>
@@ -49,12 +57,7 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
         <td
           v-for="column in columns"
           :key="column.key"
-          :class="{
-            numeric: column.numeric,
-            end: column.align === 'end',
-            'hide-mobile': column.hideOnMobile,
-          }"
-          :data-label="column.header || column.srHeader"
+          :class="{ numeric: column.numeric, end: column.align === 'end' }"
         >
           <slot :name="`cell-${column.key}`" :row="row">{{ column.value?.(row) ?? '' }}</slot>
         </td>
@@ -66,60 +69,69 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 <style scoped>
 .table {
   width: 100%;
+  /* The floor a row needs before its cells would have to wrap. Past it the panel body
+     scrolls sideways — see the file comment. */
+  min-width: var(--table-min);
   border-collapse: separate;
   border-spacing: 0;
   font-size: var(--text-sm);
+  white-space: nowrap;
 }
 
 .table th {
   position: sticky;
   top: 0;
   z-index: 1;
-  height: 36px;
-  padding: 0 var(--space-4);
+  height: var(--control-height-sm);
+  padding: 0;
   text-align: left;
-  font-size: var(--text-2xs);
+  vertical-align: middle;
+  font-size: var(--text-3xs);
   font-weight: var(--weight-semibold);
   text-transform: uppercase;
-  letter-spacing: var(--tracking-wide);
-  color: var(--muted);
-  white-space: nowrap;
+  letter-spacing: var(--tracking-label);
+  color: var(--faint);
   /* Opaque, not translucent: rows scrolling under a semi-transparent header smear into the
-     labels. */
-  background: var(--surface-2);
+     labels. It inherits the panel's surface so a sunken panel's header matches it. */
+  background: inherit;
   /* An inset shadow, not `border-bottom`: a sticky cell's border scrolls away independently
      of the cell itself, leaving the header floating unruled. */
-  box-shadow: inset 0 -1px 0 var(--border);
+  box-shadow: inset 0 -1px 0 var(--line-strong);
 }
 
 .table td {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border);
+  padding: var(--cell-y) 0;
+  border-bottom: 1px solid var(--line-soft);
   vertical-align: middle;
-  color: var(--text-secondary);
+  color: var(--ink);
 }
 
+.table.tight td {
+  padding: var(--cell-y-tight) 0;
+}
+
+/* Every column after the first is set in from the one before it; the first sits on the
+   panel's own gutter so the table has the same left edge as the heading above it. */
+.table th + th,
+.table td + td {
+  padding-left: var(--cell-x);
+}
+
+/* The panel's bottom padding is the space under the table — a rule there would read as a
+   line under the panel rather than between two rows. */
 .table tbody tr:last-child td {
   border-bottom: none;
-}
-
-.table tbody tr:hover td {
-  background: var(--surface-2);
 }
 
 /*
  * Column alignment, applied to the header and its cells as one. Written as `.table th` /
  * `.table td` rather than a bare `.numeric`, because `.table th`'s `text-align: left` sits
  * at a higher specificity and would otherwise win — leaving every numeric header
- * left-aligned over centered figures.
- *
- * Numbers are centered on the column rather than pushed to its edge: a header like COST is
- * far narrower than the track it names, and pushing the figures to the far edge strands
- * them a column's width from the word. Tabular numerals keep them a scannable block.
+ * left-aligned over right-aligned figures.
  */
 .table th.numeric,
 .table td.numeric {
-  text-align: center;
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
@@ -129,77 +141,16 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
   text-align: right;
 }
 
-/* Mobile: one card per row, each cell labelled by its column header. */
-@media (max-width: 768px) {
-  .table,
-  .table tbody,
-  .table tr,
-  .table td {
-    display: block;
-    width: auto;
-  }
-
-  .table thead {
-    display: none;
-  }
-
-  .table tbody tr {
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .table tbody tr:last-child {
-    border-bottom: none;
-  }
-
-  .table td {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: var(--space-4);
-    padding: var(--space-1) 0;
-    border-bottom: none;
-    text-align: left;
-  }
-
-  .table tbody tr:hover td {
-    background: transparent;
-  }
-
-  .table td::before {
-    content: attr(data-label);
-    flex-shrink: 0;
-    font-size: var(--text-2xs);
-    font-weight: var(--weight-medium);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-wide);
-    color: var(--faint);
-  }
-
-  /* The first cell is the row's identity — it reads as a heading, not a labelled field. */
-  .table td:first-child {
-    display: block;
-    margin-bottom: var(--space-2);
-    font-weight: var(--weight-medium);
-    color: var(--text);
-  }
-
-  .table td:first-child::before {
-    display: none;
-  }
-
-  .table td.numeric {
-    text-align: right;
-  }
-
-  /* The row is a card here, so an action reads as its last field rather than something
-     pinned to a column edge that no longer exists. */
-  .table td.end {
-    text-align: left;
-  }
-
-  .table td.hide-mobile {
-    display: none;
-  }
+/*
+ * A link or any block a cell holds must be told to ellipsize. Left inline it produces a
+ * second line box inside the cell, and rows then differ in height by a pixel or two down
+ * the whole table.
+ */
+.table td :deep(.cell-block) {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

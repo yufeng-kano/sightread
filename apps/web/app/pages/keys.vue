@@ -19,6 +19,8 @@ const createdKey = ref<CreatedApiKey | null>(null)
 /** The key the confirm dialog is asking about — revoking is irreversible. */
 const revokeTarget = ref<ApiKeySummary | null>(null)
 const revoking = ref(false)
+/** The panel the reveal is inserted into — it scrolls independently of the page. */
+const keysPanel = ref<{ scrollToTop: () => void } | null>(null)
 
 // The example's origin is this deployment's own; a placeholder until the client knows it.
 const origin = ref('https://<host>')
@@ -36,9 +38,9 @@ const curlExample = computed(
 const columns = computed<TableColumn<ApiKeySummary>[]>(() => [
   { key: 'name', header: t('keys.columnName') },
   { key: 'prefix', header: t('keys.columnPrefix') },
-  { key: 'created', header: t('keys.columnCreated'), hideOnMobile: true },
-  { key: 'lastUsed', header: t('keys.columnLastUsed') },
-  { key: 'revoke', header: '', srHeader: t('keys.revoke'), align: 'end', width: '104px' },
+  { key: 'created', header: t('keys.columnCreated'), numeric: true },
+  { key: 'lastUsed', header: t('keys.columnLastUsed'), numeric: true },
+  { key: 'revoke', header: '', srHeader: t('keys.revoke'), align: 'end', width: '88px' },
 ])
 
 function openCreate() {
@@ -59,6 +61,11 @@ async function submitCreate() {
     newKeyName.value = ''
     showCreate.value = false
     await refresh()
+    // The plaintext is shown exactly once and is unrecoverable, so it must not be left
+    // above the fold: Create key lives in the rail, which is reachable at any scroll depth
+    // in this panel, and the reveal is inserted at the panel's top.
+    await nextTick()
+    keysPanel.value?.scrollToTop()
   } catch (error) {
     mutationError.value = await resolve(error)
   } finally {
@@ -89,83 +96,87 @@ async function confirmRevoke() {
 </script>
 
 <template>
-  <div class="page">
-    <UiPageHeader :title="t('keys.headTitle')">
-      <template #actions>
-        <UiButton
-          variant="ghost"
-          icon-only
-          :label="t('common.refresh')"
-          :loading="pending"
-          @click="refresh"
-        >
-          <template #icon><UiIcon name="refresh" /></template>
-        </UiButton>
-        <UiButton variant="primary" @click="openCreate">
-          <template #icon><UiIcon name="plus" /></template>
-          {{ t('keys.create') }}
-        </UiButton>
-      </template>
-    </UiPageHeader>
+  <UiScreen>
+    <UiRail>
+      <UiPageHeader
+        :eyebrow="data ? t('keys.activeCount', { count: data.keys.length }) : ''"
+        :title="t('keys.headTitle')"
+      />
+      <!-- The page's primary action lives in the rail, not in a header bar: it is the one
+           thing this screen is for, and the rail is where the eye already is. -->
+      <UiButton variant="primary" block @click="openCreate">
+        <template #icon><UiIcon name="plus" /></template>
+        {{ t('keys.create') }}
+      </UiButton>
+    </UiRail>
 
-    <div class="stack">
-      <!-- The plaintext key exists on exactly one screen, once. It is the loudest block on the
-           page for as long as it is there, and it is dismissed by the user rather than by the
-           next navigation quietly taking it away. -->
-      <UiBanner v-if="createdKey" tone="warn">
-        <div class="reveal">
-          <p class="reveal-title">{{ t('keys.createdTitle') }}</p>
-          <code class="reveal-key mono">{{ createdKey.key }}</code>
-          <p>{{ t('keys.createdWarning') }}</p>
-        </div>
-        <template #actions>
-          <UiCopyButton :text="createdKey.key" variant="secondary" />
+    <UiRegion split ratio="1.35fr 1fr">
+      <UiPanel ref="keysPanel" :title="t('keys.listTitle')" lead>
+        <template #meta>
+          <span v-if="data">{{ t('keys.keyCount', { count: data.keys.length }) }}</span>
           <UiButton
             variant="ghost"
+            size="xs"
             icon-only
-            :label="t('common.close')"
-            @click="createdKey = null"
+            :label="t('common.refresh')"
+            :loading="pending"
+            @click="refresh"
           >
-            <template #icon><UiIcon name="close" /></template>
+            <template #icon><UiIcon name="refresh" /></template>
           </UiButton>
         </template>
-      </UiBanner>
 
-      <UiBanner v-if="mutationError" tone="error">{{ mutationError }}</UiBanner>
-      <UiBanner v-if="errorMessage" tone="error">{{ errorMessage }}</UiBanner>
+        <!-- The plaintext key exists on exactly one screen, once. It is the loudest block on
+             the page for as long as it is there, and it is dismissed by the user rather than by
+             the next navigation quietly taking it away. -->
+        <UiBanner v-if="createdKey" class="state" tone="warn">
+          <div class="reveal">
+            <p class="reveal-title">{{ t('keys.createdTitle') }}</p>
+            <code class="reveal-key mono">{{ createdKey.key }}</code>
+            <p>{{ t('keys.createdWarning') }}</p>
+          </div>
+          <template #actions>
+            <UiCopyButton :text="createdKey.key" variant="secondary" size="sm" labelled />
+            <UiButton
+              variant="ghost"
+              size="sm"
+              icon-only
+              :label="t('common.close')"
+              @click="createdKey = null"
+            >
+              <template #icon><UiIcon name="close" /></template>
+            </UiButton>
+          </template>
+        </UiBanner>
 
-      <!-- A failed refresh keeps the rows it already has; the banner above says what went
-           wrong. -->
-      <UiCard
-        v-if="data || !errorMessage"
-        :title="t('keys.listTitle')"
-        flush
-        body-max="var(--group-max)"
-      >
-        <template v-if="data" #heading>
-          <UiBadge>{{ data.keys.length }}</UiBadge>
-        </template>
+        <UiBanner v-if="mutationError" class="state" tone="error">{{ mutationError }}</UiBanner>
+        <!-- A failed refresh keeps the rows it already has; the banner says what went wrong. -->
+        <UiBanner v-if="errorMessage" class="state" tone="error">{{ errorMessage }}</UiBanner>
 
-        <UiSkeleton v-if="!data" />
+        <!-- Not just `!data`: a failed first load leaves data null with `pending` back to
+             false, and an animated skeleton beside a terminal error says the page is still
+             working when it has stopped. -->
+        <UiSkeleton v-if="!data && !errorMessage" class="state" />
 
-        <!-- No action here: Create key is in the sticky header, present at every scroll depth
-             and in every state of the page. -->
+        <!-- No action here: Create key is in the rail, present in every state of the page. -->
         <UiEmptyState
-          v-else-if="!data.keys.length"
+          v-else-if="data && !data.keys.length"
           :title="t('keys.empty')"
           :body="t('keys.emptyBody')"
         />
 
         <UiDataTable
-          v-else
+          v-else-if="data"
           :columns="columns"
           :rows="data.keys"
           :row-key="(key) => String(key.id)"
           :caption="t('keys.listTitle')"
         >
-          <template #cell-name="{ row }">{{ row.name }}</template>
+          <template #cell-name="{ row }">
+            <span class="cell-block">{{ row.name }}</span>
+          </template>
           <template #cell-prefix="{ row }">
-            <code class="mono">{{ row.prefix }}</code>
+            <code class="prefix mono">{{ row.prefix }}</code>
           </template>
           <template #cell-created="{ row }">{{ formatDateTime(row.created_at, locale) }}</template>
           <template #cell-lastUsed="{ row }">
@@ -178,7 +189,7 @@ async function confirmRevoke() {
           <template #cell-revoke="{ row }">
             <UiButton
               variant="danger"
-              size="sm"
+              size="xs"
               :label="t('keys.revokeKey', { name: row.name })"
               @click="revokeTarget = row"
             >
@@ -186,19 +197,18 @@ async function confirmRevoke() {
             </UiButton>
           </template>
         </UiDataTable>
-      </UiCard>
+      </UiPanel>
 
       <!-- The keys' one consumer worth showing here: the REST call they authorize. The
            example carries the header, so no sentence restates it. -->
-      <UiCard :title="t('keys.restTitle')">
-        <template #actions>
-          <UiCopyButton :text="curlExample" />
+      <UiPanel :title="t('keys.restTitle')" sunken divided>
+        <template #meta>
+          <UiCopyButton :text="curlExample" variant="secondary" size="xs" labelled />
         </template>
         <pre class="code mono">{{ curlExample }}</pre>
-      </UiCard>
-    </div>
-
-    <UiModal v-if="showCreate" :title="t('keys.create')" @close="showCreate = false">
+      </UiPanel>
+    </UiRegion>
+    <UiModal v-if="showCreate" :title="t('keys.create')" size="md" @close="showCreate = false">
       <form id="create-key" @submit.prevent="submitCreate">
         <UiField v-slot="{ id }" :label="t('keys.nameLabel')">
           <UiTextInput :id="id" v-model="newKeyName" :maxlength="255" required />
@@ -229,21 +239,12 @@ async function confirmRevoke() {
       @confirm="confirmRevoke"
       @cancel="revokeTarget = null"
     />
-  </div>
+  </UiScreen>
 </template>
 
 <style scoped>
-/* No gap on the page itself: UiPageHeader carries its own bottom margin, and a second
-   spacer under it would double the distance on every page. */
-.page {
-  display: flex;
-  flex-direction: column;
-}
-
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
+.state {
+  margin-top: var(--space-4);
 }
 
 .reveal {
@@ -261,7 +262,11 @@ async function confirmRevoke() {
      place it will ever be shown. */
   overflow-wrap: anywhere;
   font-size: var(--text-sm);
-  color: var(--text);
+  color: var(--ink);
+}
+
+.prefix {
+  color: var(--muted);
 }
 
 .never {
@@ -269,13 +274,15 @@ async function confirmRevoke() {
 }
 
 /* A command line must not be re-wrapped into something that no longer runs: it scrolls in
-   its own box rather than growing the page sideways. */
+   its own box rather than growing the panel sideways. */
 .code {
   margin: 0;
   overflow-x: auto;
-  color: var(--text-secondary);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--hair);
+  color: var(--muted);
   font-size: var(--text-sm);
-  line-height: 1.7;
+  line-height: 1.8;
   white-space: pre;
 }
 </style>

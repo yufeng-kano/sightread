@@ -43,7 +43,7 @@ defineProps<{
 .empty-title {
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
-  color: var(--text);
+  color: var(--ink);
 }
 
 .empty-body {

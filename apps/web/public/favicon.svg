@@ -1,6 +1,12 @@
+<!-- The brand mark: Lucide `scan-text` reversed out of an accent rounded square. Kept in
+     step with AppBrand.vue and the FastAPI consent page — one mark, three places. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="6" fill="#1f5fd6"/>
-  <rect x="8" y="7" width="16" height="18" rx="2" fill="#ffffff"/>
-  <rect x="11" y="11" width="10" height="6" rx="1" fill="#1f5fd6"/>
-  <rect x="11" y="19" width="10" height="2" rx="1" fill="#1f5fd6"/>
+  <rect width="32" height="32" rx="5" fill="#17607d"/>
+  <g fill="none" stroke="#fcfcfd" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 11V9.5A1.5 1.5 0 0 1 9.5 8H11"/>
+    <path d="M21 8h1.5A1.5 1.5 0 0 1 24 9.5V11"/>
+    <path d="M24 21v1.5a1.5 1.5 0 0 1-1.5 1.5H21"/>
+    <path d="M11 24H9.5A1.5 1.5 0 0 1 8 22.5V21"/>
+    <path d="M11.5 12.5h6M11.5 16h9M11.5 19.5h4.5"/>
+  </g>
 </svg>

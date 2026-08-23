@@ -4,8 +4,10 @@
  *
  * Unlike a quota meter the fill never escalates through amber to red: a bigger share of a
  * month's spend is not a worse state, it is just a bigger number. The figure it ranks is
- * always printed in the next column, so the bar is emphasis and never the only signal —
- * which is also why it carries an accessible name rather than a visible label.
+ * always printed beside it, so the bar is emphasis and never the only signal — which is
+ * also why it carries an accessible name rather than a visible label.
+ *
+ * A meter is data, so it is one of the few things allowed to be the accent colour.
  */
 const props = defineProps<{
   /** 0..1, this row against the largest row in the same table. */
@@ -31,18 +33,18 @@ const percent = computed(() => Math.round(Math.max(0, Math.min(1, props.share)) 
 </template>
 
 <style scoped>
+/* 3px and square. A rounded cap on a 3px bar spends a third of the smallest value on the
+   curve, which is what made short rows unreadable. */
 .track {
-  height: 5px;
-  border-radius: var(--radius-full);
-  background: var(--bar-track);
+  height: 3px;
+  background: var(--hair);
   overflow: hidden;
 }
 
 .fill {
   height: 100%;
   min-width: 1px;
-  border-radius: var(--radius-full);
-  background: var(--bar-fill);
+  background: var(--accent);
   transition: width var(--duration-slow) var(--ease);
 }
 </style>

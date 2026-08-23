@@ -6,6 +6,11 @@
  * inside itself, closes on Escape, returns focus to whatever opened it, and hides the rest
  * of the app from assistive tech (`aria-modal`).
  *
+ * Two shapes share this one primitive. A form dialog sizes to its content and scrolls its
+ * body if it has to. A `tall` dialog — the result viewer — is a fixed-height grid of header
+ * over `minmax(0, 1fr)`, because its body is itself a two-column layout with its own scroll
+ * regions and must be handed a bounded box rather than growing to fit.
+ *
  * Below 640px it becomes a bottom sheet — a centered box on a phone leaves the buttons under
  * the thumb-unfriendly middle of the screen and often behind the keyboard.
  *
@@ -14,7 +19,18 @@
  * is not inside the scrolling region at all. `overscroll-behavior: contain` on the panel
  * body stops a scroll that reaches its end from chaining anywhere.
  */
-withDefaults(defineProps<{ title: string; size?: 'sm' | 'md' }>(), { size: 'sm' })
+withDefaults(
+  defineProps<{
+    /** The dialog's accessible name. Also the visible title unless the `title` slot fills it. */
+    title: string
+    size?: 'sm' | 'md' | 'lg'
+    /** Fixed-height grid body — for a dialog whose content owns its own scroll regions. */
+    tall?: boolean
+    /** The body manages its own padding. */
+    flush?: boolean
+  }>(),
+  { size: 'sm' },
+)
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -84,26 +100,34 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
       <div
         ref="panel"
         class="panel"
-        :class="size"
+        :class="[size, { tall }]"
         role="dialog"
         aria-modal="true"
         :aria-label="title"
         tabindex="-1"
       >
         <header class="panel-head">
-          <h2 class="panel-title">{{ title }}</h2>
-          <UiButton
-            variant="ghost"
-            size="sm"
-            icon-only
-            :label="t('common.close')"
-            @click="emit('close')"
-          >
-            <template #icon><UiIcon name="close" /></template>
-          </UiButton>
+          <div class="panel-heading">
+            <slot name="title">
+              <h2 class="panel-title">{{ title }}</h2>
+            </slot>
+          </div>
+          <div class="panel-actions">
+            <slot name="actions" />
+            <UiButton
+              class="panel-close"
+              variant="ghost"
+              size="sm"
+              icon-only
+              :label="t('common.close')"
+              @click="emit('close')"
+            >
+              <template #icon><UiIcon name="close" /></template>
+            </UiButton>
+          </div>
         </header>
 
-        <div class="panel-body">
+        <div class="panel-body" :class="{ flush }">
           <slot />
         </div>
 
@@ -124,7 +148,6 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
   place-items: center;
   padding: var(--space-5);
   background: var(--overlay);
-  backdrop-filter: blur(2px);
   animation: fade var(--duration) var(--ease-enter);
 }
 
@@ -139,11 +162,9 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
   /* Never taller than the viewport: the body scrolls, the header and footer stay, so the
      confirm button is always reachable without hunting for it. */
   max-height: min(760px, calc(100dvh - var(--space-10)));
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
-  animation: rise var(--duration-slow) var(--ease-enter);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-dialog);
 }
 
 .panel.sm {
@@ -151,16 +172,35 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
 }
 
 .panel.md {
-  max-width: 720px;
+  max-width: 480px;
+}
+
+.panel.lg {
+  max-width: 1040px;
+}
+
+/*
+ * A fixed box, not a max: the viewer's body is a grid whose columns scroll independently,
+ * and a body sized to its content has no height for them to scroll within.
+ */
+.panel.tall {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: min(820px, calc(100dvh - var(--space-10)));
+  max-height: none;
 }
 
 .panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-4) var(--space-5);
-  border-bottom: 1px solid var(--border);
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-heading {
+  min-width: 0;
 }
 
 /* Ellipsizes rather than shoving the close button out of the header — the one control that
@@ -170,7 +210,22 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--text-md);
+  font-size: var(--display-sm);
+  letter-spacing: normal;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+}
+
+/* The one glyph in the app that is bigger than its button's size class would give it: at
+   13px an X in a 30px box reads as a speck. */
+.panel-close :deep(svg) {
+  width: 16px;
+  height: 16px;
 }
 
 .panel-body {
@@ -179,27 +234,28 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
   min-width: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: var(--space-5);
+  padding: var(--space-6);
+}
+
+.panel.tall .panel-body {
+  overflow: hidden;
+}
+
+.panel-body.flush {
+  padding: 0;
 }
 
 .panel-foot {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-2);
-  padding: var(--space-4) var(--space-5);
-  border-top: 1px solid var(--border);
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--line);
 }
 
 @keyframes fade {
   from {
     opacity: 0;
-  }
-}
-
-@keyframes rise {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.99);
   }
 }
 
@@ -212,14 +268,18 @@ onBeforeUnmount(() => previouslyFocused?.focus?.())
 
   .panel,
   .panel.sm,
-  .panel.md {
+  .panel.md,
+  .panel.lg {
     max-width: none;
     /* `dvh`, not `vh`: the dynamic viewport shrinks when the on-screen keyboard opens, so a
        focused field stays above it instead of being covered by it. */
     max-height: 92dvh;
-    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     border-bottom: none;
     animation: sheet var(--duration-slow) var(--ease-enter);
+  }
+
+  .panel.tall {
+    height: 92dvh;
   }
 
   .panel-foot {

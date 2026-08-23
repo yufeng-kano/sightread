@@ -9,14 +9,12 @@ export interface TableColumn<Row> {
   key: string
   /** Visible column header. Blank for an action column, which needs `srHeader` instead. */
   header: string
-  /** Centered under its header, with tabular numerals. */
+  /** Right-aligned under its header, with tabular numerals. */
   numeric?: boolean
   /** Right-aligns header and cells without the numeric treatment — for a control column. */
   align?: 'end'
-  /** Plain-text value; also the mobile card's value when the page gives no slot. */
+  /** Plain-text value, for a column whose cell needs no markup of its own. */
   value?: (row: Row) => string
-  /** Dropped from the mobile cards — for a column that only adds noise there. */
-  hideOnMobile?: boolean
   /**
    * Track width. An action column needs one: without it the column takes the table's
    * leftover width and its control ends up a long way from the row it acts on.

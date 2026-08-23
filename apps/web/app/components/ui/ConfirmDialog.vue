@@ -35,7 +35,7 @@ const { t } = useI18n()
 
 <style scoped>
 .message {
-  color: var(--text-secondary);
-  line-height: 1.6;
+  color: var(--muted);
+  line-height: 1.7;
 }
 </style>

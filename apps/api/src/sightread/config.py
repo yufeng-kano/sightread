@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     app_env: Literal["local", "production"] = "local"
     app_url: str = "http://localhost:8000"
     web_url: str = "http://localhost:3000"
+    # The web app's non-default locale prefixes, comma-separated, mirroring its i18n config
+    # (apps/web/nuxt.config.ts uses `prefix_except_default`, so the default locale has none).
+    # Sign-in returns the visitor to `WEB_URL/<prefix>` when they picked one; a value outside
+    # this list is ignored, which is what keeps the return destination un-forgeable.
+    web_locale_prefixes: str = "zh-TW"
 
     database_url: str = "postgresql+asyncpg://sightread:sightread@localhost:5432/sightread"
     postgres_user: str = "sightread"
@@ -66,6 +71,16 @@ class Settings(BaseSettings):
     @property
     def google_oidc_configured(self) -> bool:
         return bool(self.google_client_id and self.google_client_secret)
+
+    def web_url_for_locale(self, prefix: str) -> str:
+        """`WEB_URL`, prefixed when the visitor picked a non-default locale.
+
+        An unknown prefix is not an error, it is simply the default locale: the value
+        reaches us from a query string, so treating it as an allowlist rather than as a
+        path fragment is what stops it becoming an open redirect (docs/auth.md § 1).
+        """
+        allowed = {item.strip() for item in self.web_locale_prefixes.split(",") if item.strip()}
+        return f"{self.web_url}/{prefix}" if prefix in allowed else self.web_url
 
 
 @lru_cache

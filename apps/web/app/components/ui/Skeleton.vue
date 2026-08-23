@@ -26,7 +26,7 @@ const { t } = useI18n()
 .skeleton-rows {
   display: grid;
   gap: var(--space-4);
-  padding: var(--space-5) var(--space-4);
+  padding: var(--space-5) 0;
 }
 
 .skeleton-row {
@@ -38,8 +38,7 @@ const { t } = useI18n()
 .bar {
   display: block;
   height: var(--text-sm);
-  border-radius: var(--radius-full);
-  background: var(--hover);
+  background: var(--rail);
 }
 
 .name {

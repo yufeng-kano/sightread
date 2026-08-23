@@ -13,7 +13,11 @@
 const props = defineProps<{
   label: string
   error?: string
-  /** Hides the label visually, for a field whose surrounding text already names it. */
+  /**
+   * Hides the label visually, for a control the design renders bare. The label stays in the
+   * DOM rather than becoming an `aria-label`: a real `<label>` is also a click target and
+   * survives translation, and the wiring is already here.
+   */
   labelHidden?: boolean
 }>()
 
@@ -39,10 +43,14 @@ const errorId = computed(() => (props.error ? `${id}-error` : undefined))
   min-width: 0;
 }
 
+/* The uppercase field label of the Graphite system — the same treatment as a rail eyebrow
+   or a table header, so a form reads as part of the same page rather than a widget on it. */
 .field-label {
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
-  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--faint);
 }
 
 .field-error {

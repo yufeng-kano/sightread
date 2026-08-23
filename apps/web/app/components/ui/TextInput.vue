@@ -55,37 +55,27 @@ defineEmits<{ 'update:modelValue': [string] }>()
   min-width: 0;
   height: var(--control-height);
   padding: 0 var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius);
+  background: var(--paper);
+  color: var(--ink);
   font-size: var(--text-sm);
-  outline: none;
-  transition:
-    border-color var(--duration-fast) var(--ease),
-    box-shadow var(--duration-fast) var(--ease);
+  transition: border-color var(--duration-fast) var(--ease);
 }
 
 .control::placeholder {
   color: var(--faint);
 }
 
-.control:focus {
-  /* The border plus ring already meet the focus-visibility bar, and the global outline
-     would sit awkwardly outside a field's own ring. */
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-  outline: none;
-}
-
+/* Focus is the app's one ring, from main.css — nothing per-component. */
 .control:disabled {
-  background: var(--surface-2);
+  background: var(--paper-sunken);
   color: var(--muted);
   cursor: not-allowed;
 }
 
 .control.invalid {
-  border-color: var(--danger-border);
+  border-color: var(--danger-edge);
 }
 
 .mono {
@@ -97,7 +87,7 @@ defineEmits<{ 'update:modelValue': [string] }>()
 @media (pointer: coarse) {
   .control,
   .mono {
-    font-size: var(--text-md);
+    font-size: 16px;
   }
 }
 </style>

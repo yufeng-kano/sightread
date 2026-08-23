@@ -6,6 +6,7 @@ import pytest
 from httpx import AsyncClient
 
 from sightread.auth.sessions import SESSION_COOKIE
+from sightread.config import Settings
 
 from .conftest import CSRF_HEADERS
 
@@ -68,3 +69,21 @@ async def test_dev_login_route_does_not_exist(
     client = make_client(app_env=app_env, auth_dev_mode=auth_dev_mode)
     response = await client.post("/api/auth/dev-login", headers=CSRF_HEADERS)
     assert response.status_code == 404
+
+
+def test_sign_in_returns_to_the_locale_it_started_from() -> None:
+    """The Google round trip is the one leg that drops the locale (docs/auth.md § 1)."""
+    settings = Settings(web_url="https://sightread.example", web_locale_prefixes="zh-TW,ja")
+
+    assert settings.web_url_for_locale("zh-TW") == "https://sightread.example/zh-TW"
+    assert settings.web_url_for_locale("ja") == "https://sightread.example/ja"
+
+
+def test_an_unlisted_locale_falls_back_to_the_default_root() -> None:
+    """The value arrives in a query string, so anything outside the allowlist is ignored
+    rather than pasted into the destination — that is what stops it being an open
+    redirect."""
+    settings = Settings(web_url="https://sightread.example", web_locale_prefixes="zh-TW")
+
+    for hostile in ("", "en", "..", "../../evil", "//evil.example", "https://evil.example"):
+        assert settings.web_url_for_locale(hostile) == "https://sightread.example"
