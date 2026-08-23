@@ -3,8 +3,9 @@
 Two rules, strictly separated:
 
 - Anything we only ever *verify* (session tokens, API keys) is stored as a SHA-256 hash.
-- The one credential we must *replay* upstream (the user's OpenRouter key) is stored as
-  AES-256-GCM ciphertext, keyed by HKDF-SHA256 over ``SECRET_KEY``.
+- The credentials we must *replay* upstream (the user's OpenRouter key and each provider
+  connection's key) are stored as AES-256-GCM ciphertext, keyed by HKDF-SHA256 over
+  ``SECRET_KEY`` with a per-purpose context string.
 
 Nothing here ever logs or returns plaintext.
 """
@@ -19,6 +20,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 OPENROUTER_KEY_CONTEXT = b"openrouter-key-v1"
+CONNECTION_KEY_CONTEXT = b"provider-connection-key-v1"
 NONCE_BYTES = 12
 
 
@@ -27,25 +29,41 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _openrouter_aead(secret_key: str) -> AESGCM:
+def _aead(secret_key: str, context: bytes) -> AESGCM:
     derived = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=OPENROUTER_KEY_CONTEXT,
+        info=context,
     ).derive(secret_key.encode("utf-8"))
     return AESGCM(derived)
 
 
-def encrypt_openrouter_key(secret_key: str, plaintext: str) -> bytes:
+def encrypt_secret(secret_key: str, plaintext: str, context: bytes) -> bytes:
     """Return ``nonce || ciphertext``; a fresh random nonce is used for every encryption."""
     nonce = os.urandom(NONCE_BYTES)
-    return nonce + _openrouter_aead(secret_key).encrypt(nonce, plaintext.encode("utf-8"), None)
+    return nonce + _aead(secret_key, context).encrypt(nonce, plaintext.encode("utf-8"), None)
+
+
+def decrypt_secret(secret_key: str, blob: bytes, context: bytes) -> str:
+    nonce, ciphertext = blob[:NONCE_BYTES], blob[NONCE_BYTES:]
+    return _aead(secret_key, context).decrypt(nonce, ciphertext, None).decode("utf-8")
+
+
+def encrypt_openrouter_key(secret_key: str, plaintext: str) -> bytes:
+    return encrypt_secret(secret_key, plaintext, OPENROUTER_KEY_CONTEXT)
 
 
 def decrypt_openrouter_key(secret_key: str, blob: bytes) -> str:
-    nonce, ciphertext = blob[:NONCE_BYTES], blob[NONCE_BYTES:]
-    return _openrouter_aead(secret_key).decrypt(nonce, ciphertext, None).decode("utf-8")
+    return decrypt_secret(secret_key, blob, OPENROUTER_KEY_CONTEXT)
+
+
+def encrypt_connection_key(secret_key: str, plaintext: str) -> bytes:
+    return encrypt_secret(secret_key, plaintext, CONNECTION_KEY_CONTEXT)
+
+
+def decrypt_connection_key(secret_key: str, blob: bytes) -> str:
+    return decrypt_secret(secret_key, blob, CONNECTION_KEY_CONTEXT)
 
 
 def mask_openrouter_key(plaintext: str) -> str:

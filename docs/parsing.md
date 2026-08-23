@@ -43,11 +43,11 @@ The transcription prompt is a template with two tokens, `{page}` and `{bbox_form
 
 Resolution order for a job's prompt, decided at enqueue time and stored on the job row:
 
-1. **The user's custom system prompt** (`user_settings.system_prompt`, set on the web settings page) when one is stored. It replaces the template entirely — including for preset profiles — and figure/bbox quality is then the user's own responsibility.
+1. **The user's selected prompt preset** (`user_settings.prompt_preset_id` → `prompt_presets.text`, managed on the web settings page) when one is selected. It replaces the template entirely — including for preset profiles — and figure/bbox quality is then the user's own responsibility.
 2. The preset profile's template, for a job running a profile.
 3. `DEFAULT_PROMPT_TEMPLATE` (shipped in code, shown on the settings page as the default).
 
-`jobs.prompt` holds the effective template verbatim (reproducibility); `jobs.prompt_sha256` is part of the dedup cache key ([jobs.md](./jobs.md)), so editing a custom prompt invalidates cached results parsed with the old one.
+`jobs.prompt` holds the effective template verbatim (reproducibility); `jobs.prompt_sha256` is part of the dedup cache key ([jobs.md](./jobs.md)), so editing a preset's text invalidates cached results parsed with the old one.
 
 ## Profiles
 
@@ -65,8 +65,11 @@ Accepted: jpg, png, webp, heic. Normalization before the vision call, in this or
 
 Single page; `width_pt`/`height_pt` are the pixel dimensions of the (original) input image; bbox space is still 0–1000 normalized.
 
-## OpenRouter usage
+## Upstream usage (OpenRouter or an OpenAI-compatible connection)
 
-- One request per page, fanned out with an asyncio semaphore (`VISION_CONCURRENCY_PER_JOB`, default 8); 429 from OpenRouter → exponential backoff + reduced concurrency for that job.
-- Every response's `usage` object (tokens + actual `cost` — always included by OpenRouter) is written to `usage_log` per call. Never maintain a local price table.
+Vision calls run against the job's upstream ([api.md](./api.md) § Upstreams): OpenRouter when `jobs.connection_id` is NULL, otherwise that provider connection's `{base_url}/chat/completions` with the connection's key. One wire format everywhere — OpenAI Chat Completions with an `image_url` data-URI part; only OpenRouter gets the extra `usage: {include: true}` body field (unknown to other servers).
+
+- One request per page, fanned out with an asyncio semaphore (`VISION_CONCURRENCY_PER_JOB`, default 8); 429 → exponential backoff + reduced concurrency for that job.
+- Every response's `usage` object is written to `usage_log` per call. **Cost is trusted from OpenRouter only**: a custom endpoint's tokens are recorded, but any `cost` field it claims is ignored and recorded as 0 — usage totals must never mix OpenRouter's real billing with numbers an arbitrary proxy invents. Never maintain a local price table.
+- Upstream response bodies are read with a size cap (`UPSTREAM_RESPONSE_MAX_BYTES`, default 32 MB) — a user-controlled endpoint must not be able to exhaust worker/API memory with an unbounded body; over the cap the call fails as an upstream error.
 - 402 → mark the page failed with reason `payment`, continue remaining pages only if the error is page-scoped; abort the job when the key is clearly dead.

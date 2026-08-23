@@ -1,6 +1,8 @@
 # API
 
-Two planes, one FastAPI app:
+Two planes, one FastAPI app.
+
+**Upstreams.** Vision calls go to OpenRouter (the built-in default, billed to the user's own OpenRouter key) or to one of the user's **provider connections** — a named OpenAI-compatible Chat Completions endpoint (`base_url` + API key), e.g. a kano-proxy `/openai/v1` base. The active upstream is the user's `default_connection_id` setting (`NULL` = OpenRouter) and is resolved at enqueue time onto the job; `/v1/parse` has no per-request connection override yet. Preset profiles and the `/v1/models` catalog are OpenRouter-only; a custom connection always runs a raw model id from its own `/models` catalog with the default (or preset) prompt.
 
 - **Data plane `/v1/*`** — authenticated by API key (`Authorization: Bearer sr_...`) or an OAuth access token ([auth.md](./auth.md)). This is the product. `POST /v1/parse` and the three `GET /v1/jobs/{id}*` routes additionally accept a single-use upload ticket (`srt_...`, [auth.md](./auth.md) § 5): one upload, then reads of the job that upload created, nothing else.
 - **Control plane `/api/*`** — session cookie (Google OIDC), consumed only by the Nuxt web app.
@@ -20,8 +22,8 @@ Multipart form (preferred) or JSON with base64 `source`.
 | Field | Notes |
 |-------|-------|
 | `file` | required; PDF or image (jpg/png/webp/heic). Max **128 MB** (`UPLOAD_MAX_BYTES`), PDFs max **500 pages** (`PAGE_CAP`) |
-| `model` | optional OpenRouter model id; default from user settings |
-| `profile` | optional preset profile id; mutually exclusive with raw `model` + `bbox_prompt` overrides ([parsing.md](./parsing.md)) |
+| `model` | optional model id on the active upstream (OpenRouter, or the default connection's catalog); default from user settings |
+| `profile` | optional preset profile id; mutually exclusive with raw `model` + `bbox_prompt` overrides ([parsing.md](./parsing.md)); refused (400) when the user's default connection is a custom one |
 | `pages` | optional selection, e.g. `"1-5,8"`; default all |
 | `force` | optional bool; bypass dedup cache |
 
@@ -84,10 +86,13 @@ Preset profiles (id, name, model, bbox_format, description).
 | Route | Purpose |
 |-------|---------|
 | `GET /api/auth/login` → Google, `GET /api/auth/callback`, `POST /api/auth/logout` | OIDC flow ([auth.md](./auth.md)) |
-| `GET /api/me` | current user + settings (incl. `system_prompt`) + the shipped default prompt (`defaults.system_prompt`) + whether an OpenRouter key is stored (masked, never the value) |
+| `GET /api/me` | current user + settings (`default_model`, `default_profile`, `default_connection_id`, `prompt_preset_id`) + the shipped default prompt (`defaults.system_prompt`) + whether an OpenRouter key is stored (masked, never the value) |
 | `GET/POST /api/keys`, `DELETE /api/keys/{id}` | API keys; `POST` returns the created key (with plaintext) exactly once, unwrapped; `GET` wraps as `{keys: []}` |
 | `GET/PUT/DELETE /api/openrouter-key` | read masked form / store (validated against `GET https://openrouter.ai/api/v1/key` before save) / remove |
-| `PUT /api/settings` | default model / profile / custom system prompt (partial update: only the fields present in the body change; `system_prompt: null` restores the default prompt) |
+| `GET/POST /api/connections`, `PUT/DELETE /api/connections/{id}` | provider connections (below); key returned masked only; `POST`/`PUT` validate the endpoint + key with `GET {base_url}/models` before storing |
+| `GET /api/connections/{id}/models` | that connection's live model catalog (`{data: [{id, name}]}`), fetched with its stored key; no server cache |
+| `GET/POST /api/prompts`, `PUT/DELETE /api/prompts/{id}` | prompt presets (`{id, name, text}`); text capped at `SYSTEM_PROMPT_MAX_CHARS`; deleting the selected preset falls back to the default prompt |
+| `PUT /api/settings` | default model / profile / `default_connection_id` / `prompt_preset_id` (partial update: only the fields present in the body change; `null` restores the respective default). `default_profile` is refused when a custom connection is selected — profiles run on OpenRouter only |
 | `GET /api/usage?days=30` | per-day and per-model aggregates of tokens + cost from `usage_log` |
 | `GET /api/jobs?limit=50` | recent jobs (history): `job_id`, `kind`, `filename`, `status`, `model`, `profile`, `page_count`, `pages_done`, `error`, timestamps — no per-job cost (usage is aggregated per day/model only); `GET /api/jobs/{id}/result` same payload as data plane |
 
@@ -95,5 +100,6 @@ Preset profiles (id, name, model, bbox_format, description).
 
 - `UPLOAD_MAX_BYTES` = 134217728 (128 MB) — enforced in the app **and** in Caddy; keep in sync ([deployment.md](./deployment.md)).
 - `PAGE_CAP` = 500, `MAX_JOBS_PER_USER` = 2 concurrent, `VISION_CONCURRENCY_PER_JOB` = 8.
-- `SYSTEM_PROMPT_MAX_CHARS` = 8000 — cap on a custom system prompt.
+- `SYSTEM_PROMPT_MAX_CHARS` = 8000 — cap on a prompt preset's text.
+- `UPSTREAM_RESPONSE_MAX_BYTES` = 33554432 (32 MB) — cap on any upstream response body (model catalogs and vision completions); beyond it the call fails as `upstream` ([parsing.md](./parsing.md) § Upstream usage).
 - 429 with `Retry-After` when the per-user job cap is hit; upstream 402 (OpenRouter credits exhausted) maps to `payment` and fails only the affected pages.

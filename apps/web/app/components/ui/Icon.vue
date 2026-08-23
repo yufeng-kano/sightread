@@ -17,6 +17,7 @@ defineProps<{
     | 'copy'
     | 'check'
     | 'plus'
+    | 'edit'
     | 'trash'
     | 'expand'
     | 'close'
@@ -57,6 +58,12 @@ defineProps<{
     <!-- Plus: create. -->
     <template v-else-if="name === 'plus'">
       <path d="M8 3v10M3 8h10" />
+    </template>
+
+    <!-- Edit: a pencil over the thing it changes. -->
+    <template v-else-if="name === 'edit'">
+      <path d="M9.7 3.3l3 3L6 13H3v-3z" />
+      <path d="M8.5 4.5l3 3" />
     </template>
 
     <!-- Trash: delete a stored value. Paired with a visible word wherever it destroys

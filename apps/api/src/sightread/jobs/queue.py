@@ -94,12 +94,16 @@ async def find_cached_job(
     user_id: int,
     sha256: str,
     model: str,
+    connection_id: int | None,
+    connection_base_url: str | None,
     profile: str | None,
     profile_version: int,
     pages_spec: str,
     prompt_sha256: str,
 ) -> Job | None:
-    """The dedup lookup: same user, same bytes, same model/profile/pages/prompt/pipeline."""
+    """The dedup lookup: same user, bytes, model, upstream (id *and* endpoint snapshot —
+    editing a connection's URL repoints what its id means), profile, pages, prompt,
+    pipeline (docs/jobs.md § Dedup)."""
     return (
         await db.execute(
             select(Job)
@@ -107,6 +111,12 @@ async def find_cached_job(
                 Job.user_id == user_id,
                 Job.sha256 == sha256,
                 Job.model == model,
+                Job.connection_id.is_(None)
+                if connection_id is None
+                else Job.connection_id == connection_id,
+                Job.connection_base_url.is_(None)
+                if connection_base_url is None
+                else Job.connection_base_url == connection_base_url,
                 Job.profile.is_(profile) if profile is None else Job.profile == profile,
                 Job.profile_version == profile_version,
                 Job.pages_spec == pages_spec,
@@ -131,6 +141,8 @@ async def enqueue_job(
     sha256: str,
     pages_spec: str,
     model: str,
+    connection_id: int | None,
+    connection_base_url: str | None,
     profile: str | None,
     profile_version: int,
     bbox_format: str,
@@ -150,6 +162,8 @@ async def enqueue_job(
         sha256=sha256,
         pages_spec=pages_spec,
         model=model,
+        connection_id=connection_id,
+        connection_base_url=connection_base_url,
         profile=profile,
         profile_version=profile_version,
         pipeline_version=PIPELINE_VERSION,

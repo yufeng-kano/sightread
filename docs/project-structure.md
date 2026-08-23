@@ -12,7 +12,8 @@ agent-sightread/
         routes/               # v1.py (data plane), control.py (/api), oauth.py
         parsing/              # poppler.py (subprocess wrappers),
                               # images.py (heic/exif/downscale), profiles.py, markdown.py
-        upstream/             # openrouter.py (httpx client, usage capture, backoff)
+        upstream/             # openrouter.py (httpx client for OpenRouter and user-defined
+                              # OpenAI-compatible connections; usage capture, backoff)
         jobs/                 # queue.py (claim/enqueue), intake.py (store/dedup/enqueue),
                               # runner.py, sweeper.py, events.py (SSE + event pairs)
         mcp/                  # server.py: thin shell over the service layer (docs/mcp.md)
@@ -39,6 +40,6 @@ agent-sightread/
 
 - `routes/*` and `mcp/*` are thin: validation + auth + calls into `jobs`/`parsing` services. MCP owns zero business logic. `jobs/intake.py` is the shared sequence both entry points run (store → hash → probe → dedup → enqueue), so REST and MCP cannot drift apart.
 - `parsing/poppler.py` is the **only** place that spawns Poppler; everything else consumes its typed results. No PDF library imports anywhere (AGPL ban, [parsing.md](./parsing.md)).
-- `upstream/openrouter.py` is the only module that talks to OpenRouter and the only one that ever holds a decrypted user key.
+- `upstream/openrouter.py` is the only module that talks to a vision upstream (OpenRouter or a user-defined OpenAI-compatible connection) and the only one that ever holds a decrypted user key.
 - `jobs/queue.py` is the only module that knows the queue is Postgres.
 - Web: pages thin, logic in composables; API access through one typed client module.

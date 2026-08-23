@@ -29,12 +29,12 @@ from ..parsing.images import ImageError, normalize_image
 from ..parsing.markdown import PageMarkdown, assemble
 from ..parsing.profiles import transcription_prompt_template
 from ..upstream.openrouter import (
+    Connection,
     PaymentRequired,
     RateLimited,
     UpstreamError,
     Usage,
-    UserKey,
-    load_user_key,
+    load_connection,
     transcribe_page,
 )
 from . import events
@@ -107,6 +107,8 @@ class RunState:
     """Cross-page state for one run: what the fan-out has to agree about."""
 
     budget: VisionBudget
+    # UPSTREAM_RESPONSE_MAX_BYTES, carried here so page tasks need no Settings.
+    max_response_bytes: int = 33_554_432
     payment_failures: int = 0
 
 
@@ -160,7 +162,7 @@ async def _guarded_call(state: RunState, outcome: PageOutcome, call):
     except PaymentRequired:
         state.payment_failures += 1
         if state.payment_failures >= PAYMENT_FAILURES_BEFORE_ABORT:
-            raise JobAborted("OpenRouter reported exhausted credits") from None
+            raise JobAborted("the upstream reported exhausted credits") from None
         outcome.error = "payment"
         return None
     except RateLimited:
@@ -168,7 +170,7 @@ async def _guarded_call(state: RunState, outcome: PageOutcome, call):
         return None
     except UpstreamError as exc:
         if exc.fatal:
-            raise JobAborted("OpenRouter rejected the stored key") from None
+            raise JobAborted("the upstream rejected the stored key") from None
         outcome.error = "upstream call failed"
         return None
 
@@ -180,7 +182,7 @@ async def _guarded_call(state: RunState, outcome: PageOutcome, call):
 async def _process_pdf_page(
     job: Job,
     state: RunState,
-    key: UserKey,
+    connection: Connection,
     info: poppler.PdfInfo,
     page_no: int,
     source: Path,
@@ -206,7 +208,13 @@ async def _process_pdf_page(
             state,
             outcome,
             lambda: transcribe_page(
-                key, job.model, job_prompt(job), job.bbox_format, image, page_no
+                connection,
+                job.model,
+                job_prompt(job),
+                job.bbox_format,
+                image,
+                page_no,
+                max_response_bytes=state.max_response_bytes,
             ),
         )
         if transcription is not None:
@@ -218,7 +226,7 @@ async def _process_pdf_page(
 
 
 async def _process_image(
-    job: Job, state: RunState, key: UserKey, source: Path, work_dir: Path
+    job: Job, state: RunState, connection: Connection, source: Path, work_dir: Path
 ) -> PageOutcome:
     try:
         normalized = normalize_image(source, work_dir)
@@ -236,7 +244,13 @@ async def _process_image(
             state,
             outcome,
             lambda: transcribe_page(
-                key, job.model, job_prompt(job), job.bbox_format, normalized.path, 1
+                connection,
+                job.model,
+                job_prompt(job),
+                job.bbox_format,
+                normalized.path,
+                1,
+                max_response_bytes=state.max_response_bytes,
             ),
         )
         if transcription is not None:
@@ -321,19 +335,39 @@ async def run_job(
         job = (await db.execute(select(Job).where(Job.id == job_id))).scalar_one_or_none()
         if job is None or job.status != "running":
             return
-        key = await load_user_key(db, settings.secret_key, job.user_id)
+        connection = await load_connection(db, settings.secret_key, job.user_id, job.connection_id)
+        if (
+            connection is not None
+            and job.connection_id is not None
+            and job.connection_base_url != connection.base_url
+        ):
+            # The connection's URL changed while the job sat queued. The dedup key must
+            # name the endpoint that actually produced the result, not the one selected
+            # at submission (docs/jobs.md § Dedup).
+            job.connection_base_url = connection.base_url
+            await db.commit()
 
-    if key is None:
-        await _finish(sessionmaker, job_id, status="failed", error="no OpenRouter key stored")
+    if connection is None:
+        error = (
+            "no OpenRouter key stored"
+            if job.connection_id is None
+            else "the provider connection for this job no longer exists"
+        )
+        await _finish(sessionmaker, job_id, status="failed", error=error)
         return
 
     source = Path(job.source_path or "")
     work_dir = Path(settings.upload_dir) / str(job.id)
     work_dir.mkdir(parents=True, exist_ok=True)
-    state = RunState(budget=VisionBudget(settings.vision_concurrency_per_job))
+    state = RunState(
+        budget=VisionBudget(settings.vision_concurrency_per_job),
+        max_response_bytes=settings.upstream_response_max_bytes,
+    )
 
     try:
-        outcomes = await _process_job(job, state, key, source, work_dir, render_slots, sessionmaker)
+        outcomes = await _process_job(
+            job, state, connection, source, work_dir, render_slots, sessionmaker
+        )
     except JobAborted as exc:
         await _finish(sessionmaker, job_id, status="failed", error=str(exc))
         return
@@ -409,7 +443,7 @@ async def run_job(
 async def _process_job(
     job: Job,
     state: RunState,
-    key: UserKey,
+    connection: Connection,
     source: Path,
     work_dir: Path,
     render_slots: asyncio.Semaphore,
@@ -417,7 +451,7 @@ async def _process_job(
 ) -> list[PageOutcome]:
     """Fan the job's pages out and record each as it finishes."""
     if job.kind == "image":
-        outcome = await _process_image(job, state, key, source, work_dir)
+        outcome = await _process_image(job, state, connection, source, work_dir)
         await _record_page(sessionmaker, job, outcome)
         return [outcome]
 
@@ -428,7 +462,7 @@ async def _process_job(
 
     async def process(page_no: int) -> None:
         outcome = await _process_pdf_page(
-            job, state, key, info, page_no, source, work_dir, render_slots
+            job, state, connection, info, page_no, source, work_dir, render_slots
         )
         outcomes[page_no] = outcome
         await _record_page(sessionmaker, job, outcome)

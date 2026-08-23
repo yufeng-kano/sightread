@@ -74,22 +74,57 @@ def resolve_kind(filename: str, media_type: str) -> tuple[str, str]:
     raise ApiError(400, "invalid_request", "Only PDF and jpg/png/webp/heic images are accepted")
 
 
-async def resolve_target(
-    user: User, model: str | None, profile_id: str | None
-) -> tuple[str, str | None, int, str, str]:
-    """Model, profile, profile version, bbox format and prompt template for this job.
+@dataclass(frozen=True)
+class Target:
+    """What a job will run: model, profile facts, prompt and the upstream it calls.
 
-    A preset profile resolves its model from the live catalog. A raw model id runs the
-    default prompt and is untested by us. The user's custom system prompt, when stored,
-    replaces the template in every case (docs/parsing.md § Prompts).
+    `connection_base_url` snapshots the endpoint at enqueue time — part of the dedup key,
+    so editing a connection's URL invalidates the old endpoint's cached results.
+    """
+
+    model: str
+    profile: str | None
+    profile_version: int
+    bbox_format: str
+    prompt: str
+    connection_id: int | None
+    connection_base_url: str | None
+
+
+async def resolve_target(user: User, model: str | None, profile_id: str | None) -> Target:
+    """Model, profile, bbox format, prompt template and upstream for this job.
+
+    A preset profile resolves its model from the live OpenRouter catalog. A raw model id
+    runs the default prompt and is untested by us. The user's selected prompt preset, when
+    one is set, replaces the template in every case (docs/parsing.md § Prompts). When the
+    user's default connection is a custom OpenAI-compatible endpoint, profiles do not
+    apply and the model id belongs to that endpoint's catalog (docs/api.md § Upstreams).
     """
     settings_row = user.settings
-    custom_prompt = settings_row.system_prompt if settings_row else None
+    preset = settings_row.prompt_preset if settings_row else None
+    custom_prompt = preset.text if preset else None
+    connection = settings_row.default_connection if settings_row else None
     if not model and not profile_id:
         profile_id = settings_row.default_profile if settings_row else None
         model = settings_row.default_model if settings_row else None
     if model and profile_id:
         raise ApiError(400, "invalid_request", "Pass either 'model' or 'profile', not both")
+
+    if connection is not None:
+        if profile_id:
+            raise ApiError(
+                400,
+                "invalid_request",
+                "Profiles run on OpenRouter only; pass 'model' or switch back to OpenRouter",
+            )
+        if not model:
+            raise ApiError(
+                400, "invalid_request", "No model configured: pass 'model' or set a default"
+            )
+        prompt = custom_prompt or transcription_prompt_template(None)
+        return Target(
+            model, None, 0, BBOX_FORMAT_YXYX, prompt, connection.id, connection.base_url
+        )
 
     if profile_id:
         profile = get_profile(profile_id)
@@ -99,11 +134,13 @@ async def resolve_target(
         if resolved is None:
             raise ApiError(503, "upstream", f"Profile '{profile_id}' has no available model")
         prompt = custom_prompt or profile.prompt_template
-        return resolved, profile.id, profile.profile_version, profile.bbox_format, prompt
+        return Target(
+            resolved, profile.id, profile.profile_version, profile.bbox_format, prompt, None, None
+        )
 
     if model:
         prompt = custom_prompt or transcription_prompt_template(None)
-        return model, None, 0, BBOX_FORMAT_YXYX, prompt
+        return Target(model, None, 0, BBOX_FORMAT_YXYX, prompt, None, None)
 
     raise ApiError(
         400, "invalid_request", "No model configured: pass 'model' or 'profile', or set a default"
@@ -171,10 +208,8 @@ async def submit_parse(
     here (413, 400, 429) costs the caller its one upload (docs/auth.md § 5).
     """
     kind, media_type = resolve_kind(filename, media_type)
-    target_model, target_profile, profile_version, bbox_format, prompt = await resolve_target(
-        user, model, profile_id
-    )
-    prompt_sha256 = hashlib.sha256(prompt.encode()).hexdigest()
+    target = await resolve_target(user, model, profile_id)
+    prompt_sha256 = hashlib.sha256(target.prompt.encode()).hexdigest()
 
     if await count_running_jobs(db, user.id) >= settings.max_jobs_per_user:
         raise ApiError(
@@ -203,9 +238,11 @@ async def submit_parse(
             db,
             user_id=user.id,
             sha256=sha256,
-            model=target_model,
-            profile=target_profile,
-            profile_version=profile_version,
+            model=target.model,
+            connection_id=target.connection_id,
+            connection_base_url=target.connection_base_url,
+            profile=target.profile,
+            profile_version=target.profile_version,
             pages_spec=pages_spec,
             prompt_sha256=prompt_sha256,
         )
@@ -237,11 +274,13 @@ async def submit_parse(
         size_bytes=size_bytes,
         sha256=sha256,
         pages_spec=pages_spec,
-        model=target_model,
-        profile=target_profile,
-        profile_version=profile_version,
-        bbox_format=bbox_format,
-        prompt=prompt,
+        model=target.model,
+        connection_id=target.connection_id,
+        connection_base_url=target.connection_base_url,
+        profile=target.profile,
+        profile_version=target.profile_version,
+        bbox_format=target.bbox_format,
+        prompt=target.prompt,
         prompt_sha256=prompt_sha256,
         page_count=page_count,
         source_path=str(stored),

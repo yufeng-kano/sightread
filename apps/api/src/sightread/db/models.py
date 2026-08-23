@@ -21,6 +21,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     text,
 )
@@ -120,6 +121,43 @@ class OpenRouterKey(Base):
     user: Mapped[User] = relationship(back_populates="openrouter_key")
 
 
+class ProviderConnection(Base):
+    """A user-defined OpenAI-compatible upstream (docs/api.md § Upstreams).
+
+    The connection's API key follows the OpenRouter key's rules exactly: AES-256-GCM
+    ciphertext only, masked form for display, plaintext never stored (docs/auth.md § 3).
+    """
+
+    __tablename__ = "provider_connections"
+    __table_args__ = (
+        UniqueConstraint("user_id", "name", name="uq_provider_connections_user_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    base_url: Mapped[str] = mapped_column(String(1024))
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    masked: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow, onupdate=utcnow)
+
+
+class PromptPreset(Base):
+    """A named transcription prompt; selecting one replaces the template entirely
+    (docs/parsing.md § Prompts)."""
+
+    __tablename__ = "prompt_presets"
+    __table_args__ = (UniqueConstraint("user_id", "name", name="uq_prompt_presets_user_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=utcnow, onupdate=utcnow)
+
+
 class UserSettings(Base):
     __tablename__ = "user_settings"
 
@@ -128,10 +166,22 @@ class UserSettings(Base):
     )
     default_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     default_profile: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Custom transcription prompt; NULL means the shipped default (docs/parsing.md § Prompts).
-    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The active upstream; NULL means the built-in OpenRouter (docs/api.md § Upstreams).
+    default_connection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("provider_connections.id", ondelete="SET NULL"), nullable=True
+    )
+    # The selected prompt preset; NULL means the shipped default (docs/parsing.md § Prompts).
+    prompt_preset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("prompt_presets.id", ondelete="SET NULL"), nullable=True
+    )
 
     user: Mapped[User] = relationship(back_populates="settings")
+    default_connection: Mapped[ProviderConnection | None] = relationship(
+        foreign_keys=[default_connection_id], lazy="selectin"
+    )
+    prompt_preset: Mapped[PromptPreset | None] = relationship(
+        foreign_keys=[prompt_preset_id], lazy="selectin"
+    )
 
 
 class Job(Base):
@@ -145,6 +195,7 @@ class Job(Base):
             "user_id",
             "sha256",
             "model",
+            "connection_id",
             "profile",
             "profile_version",
             "pages_spec",
@@ -168,6 +219,15 @@ class Job(Base):
     profile_version: Mapped[int] = mapped_column(Integer, default=0)
     pipeline_version: Mapped[int] = mapped_column(Integer, default=0)
     bbox_format: Mapped[str] = mapped_column(String(32))
+    # The upstream this job ran on; NULL means OpenRouter (docs/api.md § Upstreams).
+    # Deliberately NOT a foreign key: provider identity is immutable job history. A FK
+    # with SET NULL would relabel a deleted connection's jobs as OpenRouter jobs — a
+    # queued one would then bill the wrong key, and a succeeded one would satisfy
+    # OpenRouter dedup lookups with another upstream's output (docs/database.md).
+    connection_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Endpoint snapshot at enqueue; part of the dedup key so editing a connection's URL
+    # invalidates results parsed through the old endpoint (docs/jobs.md § Dedup).
+    connection_base_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     # The effective prompt template, verbatim; its hash is part of the dedup key.
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_sha256: Mapped[str] = mapped_column(String(64), default="", server_default="")

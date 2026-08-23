@@ -49,7 +49,8 @@ async def test_settings_accept_a_known_profile_only(signed_in: AsyncClient) -> N
     assert ok.json() == {
         "default_model": "google/gemini-2.5-flash",
         "default_profile": "gemini-yxyx",
-        "system_prompt": None,
+        "default_connection_id": None,
+        "prompt_preset_id": None,
     }
 
     bad = await signed_in.put(
