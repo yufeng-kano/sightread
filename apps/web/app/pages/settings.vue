@@ -170,6 +170,21 @@ function closeConnectionModal() {
   keyError.value = null
 }
 
+/**
+ * What Escape, the overlay and Cancel do — as opposed to `closeConnectionModal`, which is
+ * how a *successful* save puts the dialog away.
+ *
+ * A save in flight refuses dismissal: those two paths bypass the disabled Cancel button,
+ * and a dialog dismissed mid-save can be reopened on a fresh draft that the original
+ * request's completion would then close, wiping a key the user had just typed.
+ */
+function dismissConnectionModal() {
+  if (connPending.value || keyPending.value) {
+    return
+  }
+  closeConnectionModal()
+}
+
 async function submitConnection() {
   const modal = connectionModal.value
   if (!modal || connPending.value) {
@@ -407,18 +422,24 @@ async function saveOpenRouterKey(onSaved?: () => void) {
   keyError.value = null
   connError.value = null
   keyMessage.value = null
+  let saved = false
   try {
     await putOpenRouterKey(candidate)
     keyInput.value = ''
     keyMessage.value = t('settings.openrouterSaved')
     await auth.refresh()
-    onSaved?.()
+    saved = true
   } catch (error) {
     const message = await resolve(error)
     keyError.value = message
     connError.value = message
   } finally {
     keyPending.value = false
+  }
+  // After the flag clears, never inside the `try`: the callback closes the dialog, and a
+  // dialog cannot be put away while its own save still reads as pending.
+  if (saved) {
+    onSaved?.()
   }
 }
 
@@ -680,7 +701,7 @@ async function removePrompt() {
                       ? t('settings.keyDialogTitle')
                       : t('settings.connectionEditTitle')
                   "
-                  :disabled="providerPending || connPending || providerUnresolved"
+                  :disabled="providerPending || connPending || keyPending || providerUnresolved"
                   @click="openProviderEdit"
                 >
                   <template #icon><UiIcon name="edit" /></template>
@@ -947,7 +968,7 @@ async function removePrompt() {
             ? t('settings.connectionEditTitle')
             : t('settings.keyDialogTitle')
       "
-      @close="closeConnectionModal"
+      @close="dismissConnectionModal"
     >
       <form id="connection-form" class="modal-form" @submit.prevent="submitConnection">
         <template v-if="connectionModal.mode !== 'key'">
@@ -992,7 +1013,7 @@ async function removePrompt() {
         <UiBanner v-if="connError" tone="error">{{ connError }}</UiBanner>
       </form>
       <template #footer>
-        <UiButton variant="ghost" :disabled="connPending || keyPending" @click="closeConnectionModal">
+        <UiButton variant="ghost" :disabled="connPending || keyPending" @click="dismissConnectionModal">
           {{ t('common.cancel') }}
         </UiButton>
         <UiButton
