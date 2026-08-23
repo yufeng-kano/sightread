@@ -26,14 +26,19 @@ from ..auth.deps import (
 from ..db.models import Job, Result, User
 from ..errors import ApiError
 from ..jobs import events
-from ..jobs.intake import PDF_MEDIA_TYPE, base64_chunks, cached_payload, submit_parse
+from ..jobs.intake import (
+    PDF_MEDIA_TYPE,
+    base64_chunks,
+    cached_payload,
+    submit_parse,
+    upload_chunks,
+)
 from ..jobs.runner import result_payload
 from ..parsing.profiles import PRESET_PROFILES
 from ..upstream.openrouter import fetch_image_models
 
 router = APIRouter(prefix="/v1", tags=["data"])
 
-UPLOAD_CHUNK_BYTES = 1024 * 1024
 SSE_MEDIA_TYPE = "text/event-stream"
 
 
@@ -99,11 +104,6 @@ async def list_profiles(user: ReaderUser):
 # --- parse ----------------------------------------------------------------------------
 
 
-async def _upload_chunks(upload: UploadFile) -> AsyncIterator[bytes]:
-    while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
-        yield chunk
-
-
 def _form_value(form, field: str) -> str | None:
     value = form.get(field)
     return value.strip() if isinstance(value, str) and value.strip() else None
@@ -149,7 +149,7 @@ async def parse(request: Request, caller: UploaderCaller, db: DbSession, setting
             _form_value(form, "pages"),
             _form_value(form, "force") in ("1", "true", "yes"),
         )
-        chunks = _upload_chunks(upload)
+        chunks = upload_chunks(upload)
     else:
         try:
             body = ParseJson.model_validate(await request.json())

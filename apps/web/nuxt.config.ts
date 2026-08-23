@@ -52,11 +52,13 @@ export default defineNuxtConfig({
     '/dashboard': { ssr: false },
     '/keys': { ssr: false },
     '/settings': { ssr: false },
-    '/jobs': { ssr: false },
+    '/files': { ssr: false },
+    '/history': { ssr: false },
     '/zh-TW/dashboard': { ssr: false },
     '/zh-TW/keys': { ssr: false },
     '/zh-TW/settings': { ssr: false },
-    '/zh-TW/jobs': { ssr: false },
+    '/zh-TW/files': { ssr: false },
+    '/zh-TW/history': { ssr: false },
   },
 
   nitro: {

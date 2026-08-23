@@ -40,7 +40,9 @@ from ..db.models import (
     utcnow,
 )
 from ..errors import ApiError
+from ..jobs.intake import PDF_MEDIA_TYPE
 from ..jobs.runner import result_payload
+from ..parsing.images import ACCEPTED_IMAGE_TYPES
 from ..parsing.profiles import DEFAULT_PROMPT_TEMPLATE, get_profile
 from ..upstream.openrouter import (
     fetch_connection_models,
@@ -146,7 +148,7 @@ async def dev_login(db: DbSession):
 
 
 @router.get("/me")
-async def me(user: SessionUser, db: DbSession):
+async def me(user: SessionUser, db: DbSession, settings: AppSettings):
     settings_row = (
         await db.execute(select(UserSettings).where(UserSettings.user_id == user.id))
     ).scalar_one_or_none()
@@ -173,6 +175,13 @@ async def me(user: SessionUser, db: DbSession):
             "present": key_row is not None,
             "masked": key_row.masked if key_row else None,
             "updated_at": key_row.updated_at if key_row else None,
+        },
+        # What the upload UI is allowed to send, from the server's own configuration —
+        # a limit written twice is a limit that drifts (docs/api.md § Limits).
+        "limits": {
+            "upload_max_bytes": settings.upload_max_bytes,
+            "page_cap": settings.page_cap,
+            "accepted_media_types": [PDF_MEDIA_TYPE, *ACCEPTED_IMAGE_TYPES],
         },
     }
 

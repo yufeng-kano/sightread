@@ -86,7 +86,7 @@ Preset profiles (id, name, model, bbox_format, description).
 | Route | Purpose |
 |-------|---------|
 | `GET /api/auth/login` → Google, `GET /api/auth/callback`, `POST /api/auth/logout` | OIDC flow ([auth.md](./auth.md)) |
-| `GET /api/me` | current user (incl. `picture`, the Google avatar URL) + settings (`default_model`, `default_profile`, `default_connection_id`, `prompt_preset_id`) + the shipped default prompt (`defaults.system_prompt`) + whether an OpenRouter key is stored (masked, never the value) |
+| `GET /api/me` | current user (incl. `picture`, the Google avatar URL) + settings (`default_model`, `default_profile`, `default_connection_id`, `prompt_preset_id`) + the shipped default prompt (`defaults.system_prompt`) + whether an OpenRouter key is stored (masked, never the value) + `limits` (`upload_max_bytes`, `page_cap`, `accepted_media_types`) so the upload UI enforces the server's numbers rather than its own |
 | `GET/POST /api/keys`, `DELETE /api/keys/{id}` | API keys; `POST` returns the created key (with plaintext) exactly once, unwrapped; `GET` wraps as `{keys: []}` |
 | `GET/PUT/DELETE /api/openrouter-key` | read masked form / store (validated against `GET https://openrouter.ai/api/v1/key` before save) / remove |
 | `GET/POST /api/connections`, `PUT/DELETE /api/connections/{id}` | provider connections (a profile: `name`, `base_url`, API key, `model`); key returned masked only; `POST` requires `model` and `POST`/`PUT` validate the endpoint + key with `GET {base_url}/models` before storing |
@@ -95,6 +95,15 @@ Preset profiles (id, name, model, bbox_format, description).
 | `PUT /api/settings` | default model / profile (OpenRouter-only defaults) / `default_connection_id` / `prompt_preset_id` (partial update: only the fields present in the body change; `null` restores the respective default). `default_profile` is refused when a custom connection is selected — profiles run on OpenRouter only; a connection's model lives on the connection itself |
 | `GET /api/usage?days=30` | per-day and per-model aggregates of tokens + cost from `usage_log` |
 | `GET /api/jobs?limit=50` | recent jobs (history): `job_id`, `kind`, `filename`, `status`, `model`, `profile`, `page_count`, `pages_done`, `error`, timestamps — no per-job cost (usage is aggregated per day/model only); `GET /api/jobs/{id}/result` same payload as data plane |
+| `GET /api/library` | the whole file library in one read: `{folders: [...], documents: [...]}`. A document carries its own fields (`id`, `folder_id`, `name`, `job_id`) plus the parse's live state (`status`, `kind`, `model`, `page_count`, `pages_done`, `size_bytes`, `error`, `created_at`, `finished_at`) — the browser needs no second request to render a row or its progress |
+| `POST /api/library/folders`, `PUT/DELETE /api/library/folders/{id}` | create (`name`, optional `parent_id`) / rename **and** move (partial: only the fields present change) / delete. Deleting cascades to the subtree; a `parent_id` inside the folder's own subtree is refused (a directory cannot contain itself). A name that is already taken is suffixed ` (2)` on create and on move, and answers 409 on a rename |
+| `POST /api/library/documents` | **the web upload.** Multipart `file` + optional `folder_id`, streamed to disk by the same `jobs.intake` sequence `/v1/parse` runs, then a document row naming the job. 201 with the document; a dedup hit points at the cached job and is already `succeeded` |
+| `PUT/DELETE /api/library/documents/{id}` | rename / move (`name`, `folder_id`) / delete the library entry. Deleting removes the entry, never the job or its result ([database.md](./database.md) § Rules) |
+| `GET /api/library/documents/{id}/result` | the document's result, same payload as the data plane's `/result` |
+
+### Why the web upload is a control-plane route
+
+`POST /api/library/documents` duplicates no logic: it reads a multipart body and hands it to `jobs.intake.submit_parse`, exactly as `POST /v1/parse` does. It exists as a separate route because the two planes authenticate differently and must keep doing so — the data plane is bearer-only (API key, OAuth token, upload ticket) and the control plane is session-cookie plus the `X-Requested-With` CSRF pairing. Teaching `/v1/parse` to accept a cookie would put a CSRF-shaped hole in the product's own API; teaching the web app to mint itself an API key would put a durable credential in a browser. So the browser posts to the control plane with the credential it already has, and the bytes take the same path every other `/api/*` request takes: browser → Caddy → FastAPI. Nothing document-shaped enters the Nuxt server ([web.md](./web.md) § Rules).
 
 ## Limits (defaults, env-overridable)
 

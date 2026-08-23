@@ -92,12 +92,20 @@ export interface OpenRouterKeyState {
   updated_at: string | null
 }
 
+/** The server's own upload limits, so the file picker enforces one set of numbers. */
+export interface UploadLimits {
+  upload_max_bytes: number
+  page_cap: number
+  accepted_media_types: string[]
+}
+
 export interface MeResponse {
   user: User
   settings: UserSettings
   /** What "default" means right now — the shipped prompt the backend runs without a custom one. */
   defaults: { system_prompt: string }
   openrouter_key: OpenRouterKeyState
+  limits: UploadLimits
 }
 
 export interface ApiKeySummary {
@@ -192,6 +200,40 @@ export interface JobResult {
   meta: ResultMeta
 }
 
+/** A directory in the file library; `parent_id` null is the root (docs/web.md § Files). */
+export interface LibraryFolder {
+  id: number
+  parent_id: number | null
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * One file: the entry, plus the live state of the parse behind it. The two travel together
+ * so a row renders — name, status, progress — from a single `GET /api/library`.
+ */
+export interface LibraryDocument {
+  id: number
+  folder_id: number | null
+  name: string
+  job_id: string
+  status: JobStatus
+  kind: string
+  model: string
+  page_count: number | null
+  pages_done: number
+  size_bytes: number
+  error: string | null
+  created_at: string
+  finished_at: string | null
+}
+
+export interface LibraryResponse {
+  folders: LibraryFolder[]
+  documents: LibraryDocument[]
+}
+
 export interface ModelEntry {
   id: string
   name: string | null
@@ -232,7 +274,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (method !== 'GET') {
     headers[CSRF_HEADER] = 'fetch'
   }
-  if (body !== undefined) {
+  // `FormData` sets its own `Content-Type` with the multipart boundary in it; naming the
+  // type here would send a boundary-less header and the body would arrive unparseable.
+  const multipart = body instanceof FormData
+  if (body !== undefined && !multipart) {
     headers['Content-Type'] = 'application/json'
   }
 
@@ -242,7 +287,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
       method,
       headers,
       credentials: 'include',
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined ? undefined : multipart ? (body as FormData) : JSON.stringify(body),
     })
   } catch (cause) {
     throw new ApiRequestError(0, 'internal', cause instanceof Error ? cause.message : 'Network error')
@@ -394,6 +439,62 @@ export function listJobs(limit: number): Promise<{ jobs: JobSummary[] }> {
 
 export function getJobResult(jobId: string): Promise<JobResult> {
   return request('GET', `/api/jobs/${jobId}/result`)
+}
+
+// --- file library (docs/web.md § Files) ------------------------------------
+
+export function getLibrary(): Promise<LibraryResponse> {
+  return request('GET', '/api/library')
+}
+
+export function createFolder(body: {
+  name: string
+  parent_id: number | null
+}): Promise<LibraryFolder> {
+  return request('POST', '/api/library/folders', body)
+}
+
+/** Partial: rename, move, or both. A rename onto a taken name answers 409. */
+export function updateFolder(
+  id: number,
+  body: Partial<{ name: string; parent_id: number | null }>,
+): Promise<LibraryFolder> {
+  return request('PUT', `/api/library/folders/${id}`, body)
+}
+
+export function deleteFolder(id: number): Promise<void> {
+  return request<undefined>('DELETE', `/api/library/folders/${id}`)
+}
+
+/**
+ * The upload. The body is `FormData`, so `Content-Type` is left to the browser — it has to
+ * carry the multipart boundary, and setting the header by hand drops it.
+ *
+ * Same origin, like every other call here: production routes `/api/*` to FastAPI at the
+ * edge, so the bytes never enter the Nuxt server (docs/web.md § Rules).
+ */
+export function uploadDocument(file: File, folderId: number | null): Promise<LibraryDocument> {
+  const body = new FormData()
+  body.append('file', file)
+  if (folderId !== null) {
+    body.append('folder_id', String(folderId))
+  }
+  return request('POST', '/api/library/documents', body)
+}
+
+export function updateDocument(
+  id: number,
+  body: Partial<{ name: string; folder_id: number | null }>,
+): Promise<LibraryDocument> {
+  return request('PUT', `/api/library/documents/${id}`, body)
+}
+
+export function deleteDocument(id: number): Promise<void> {
+  return request<undefined>('DELETE', `/api/library/documents/${id}`)
+}
+
+export function getDocumentResult(id: number): Promise<JobResult> {
+  return request('GET', `/api/library/documents/${id}/result`)
 }
 
 // --- data plane reads the web app is allowed to make (docs/web.md) ---------

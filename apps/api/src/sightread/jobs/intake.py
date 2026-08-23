@@ -1,9 +1,10 @@
 """Parse intake: everything between "bytes arrive" and "a job exists" (docs/api.md, docs/jobs.md).
 
-`POST /v1/parse` runs this one sequence — store, hash, probe, dedup, enqueue — whichever
-credential opened the door (API key, OAuth token or an upload ticket). The route keeps only
-its transport concerns (multipart vs base64, SSE vs JSON); the shell owns no business logic
-(docs/project-structure.md).
+`POST /v1/parse` and the web library's `POST /api/library/documents` run this one sequence
+— store, hash, probe, dedup, enqueue — whichever credential opened the door (API key, OAuth
+token, upload ticket, or the web session). A route keeps only its transport concerns
+(multipart vs base64, SSE vs JSON, which folder the file lands in); the shell owns no
+business logic (docs/project-structure.md).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +40,7 @@ from .runner import result_payload
 
 PDF_MEDIA_TYPE = "application/pdf"
 RETRY_AFTER_SECONDS = 30
+UPLOAD_CHUNK_BYTES = 1024 * 1024
 # Base64 decodes in whole 4-character groups, so the slice length must stay a multiple of 4.
 BASE64_CHUNK_CHARS = 4 * 256 * 1024
 
@@ -48,6 +51,23 @@ class Submission:
 
     job: Job | None = None
     cached: Result | None = None
+
+
+class ChunkReader(Protocol):
+    """What a multipart upload has to offer to be streamed: `read(size)`.
+
+    Typed as a protocol rather than as Starlette's `UploadFile` so this layer stays a
+    service and not a piece of the web framework — every route that accepts a file hands
+    its own reader in (docs/project-structure.md § Boundaries).
+    """
+
+    async def read(self, size: int = -1) -> bytes: ...
+
+
+async def upload_chunks(upload: ChunkReader) -> AsyncIterator[bytes]:
+    """Read a multipart upload in slices, so the document never sits in memory whole."""
+    while chunk := await upload.read(UPLOAD_CHUNK_BYTES):
+        yield chunk
 
 
 async def base64_chunks(source: str) -> AsyncIterator[bytes]:

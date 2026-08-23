@@ -27,7 +27,8 @@ const auth = useAuth()
 
 const NAV = [
   { icon: 'dashboard', to: '/dashboard', label: 'nav.dashboard' },
-  { icon: 'jobs', to: '/jobs', label: 'nav.jobs' },
+  { icon: 'files', to: '/files', label: 'nav.files' },
+  { icon: 'history', to: '/history', label: 'nav.history' },
   { icon: 'keys', to: '/keys', label: 'nav.keys' },
   { icon: 'connect', to: '/connect', label: 'nav.connect' },
   { icon: 'settings', to: '/settings', label: 'nav.settings' },

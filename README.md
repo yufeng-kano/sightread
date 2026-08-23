@@ -6,6 +6,7 @@ Vision document parsing as a service: PDF or image in, markdown with figure coor
 - REST first (`POST /v1/parse`), with a hosted MCP endpoint on top that works as a Claude custom connector (OAuth, no key pasting).
 - Figures come back as coordinates (`![fig1](sightread://p3/120,60,480,940)`, `[ymin,xmin,ymax,xmax]` normalized 0–1000) — you crop, we don't.
 - Text-layer pages convert for free; only visually hard pages hit the vision model.
+- Or skip the terminal: the web app has a file library — folders that nest, drag-and-drop, live parse progress, and the finished document rendered in place.
 - FastAPI + PostgreSQL + Poppler + Nuxt, deployed with docker-compose behind Caddy.
 
 ## Quick start (local)

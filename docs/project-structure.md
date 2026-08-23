@@ -9,7 +9,8 @@ agent-sightread/
         config.py             # env settings (pydantic-settings)
         db/                   # engine, models, session helpers
         auth/                 # oidc.py, sessions.py, api_keys.py, oauth_as.py, crypto.py
-        routes/               # v1.py (data plane), control.py (/api), oauth.py
+        routes/               # v1.py (data plane), control.py (/api),
+                              # library.py (/api/library — the web file library), oauth.py
         parsing/              # poppler.py (subprocess wrappers),
                               # images.py (heic/exif/downscale), profiles.py, markdown.py
         upstream/             # openrouter.py (httpx client for OpenRouter and user-defined
@@ -38,7 +39,7 @@ agent-sightread/
 
 ## Boundaries
 
-- `routes/*` and `mcp/*` are thin: validation + auth + calls into `jobs`/`parsing` services. MCP owns zero business logic. `jobs/intake.py` is the shared sequence both entry points run (store → hash → probe → dedup → enqueue), so REST and MCP cannot drift apart.
+- `routes/*` and `mcp/*` are thin: validation + auth + calls into `jobs`/`parsing` services. MCP owns zero business logic. `jobs/intake.py` is the shared sequence **all three** entry points run (store → hash → probe → dedup → enqueue), so REST, MCP and the web library's upload cannot drift apart — `routes/library.py` adds a name and a folder to the job that sequence returns, nothing more.
 - `parsing/poppler.py` is the **only** place that spawns Poppler; everything else consumes its typed results. No PDF library imports anywhere (AGPL ban, [parsing.md](./parsing.md)).
 - `upstream/openrouter.py` is the only module that talks to a vision upstream (OpenRouter or a user-defined OpenAI-compatible connection) and the only one that ever holds a decrypted user key.
 - `jobs/queue.py` is the only module that knows the queue is Postgres.

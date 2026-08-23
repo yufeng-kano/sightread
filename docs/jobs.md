@@ -21,7 +21,7 @@ One worker process runs one job at a time — concurrency inside a job is the pa
 
 ## Concurrency caps (defaults)
 
-- `MAX_JOBS_PER_USER` = 2 running jobs; excess `POST /v1/parse` gets 429 + `Retry-After` (fail closed, never crash).
+- `MAX_JOBS_PER_USER` = 2 running jobs; excess `POST /v1/parse` gets 429 + `Retry-After` (fail closed, never crash). The web library's upload runs the same intake and hits the same cap, so a multi-file drop is a client-side queue that treats the 429 as back-pressure and retries ([web.md](./web.md) § Files) — the cap is not relaxed for a browser.
 - `VISION_CONCURRENCY_PER_JOB` = 8 concurrent OpenRouter calls.
 - `RENDER_WORKERS` = CPU count (env-overridable) concurrent Poppler subprocesses per worker.
 

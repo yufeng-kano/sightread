@@ -2,10 +2,14 @@
 /**
  * A finished parse, as a document rather than as a blob of JSON.
  *
- * The dialog is the reason the Jobs filename is a link: what a caller actually wants to
- * check is whether the markdown came back right, and a `<pre>` of the whole envelope makes
- * that a reading exercise. The JSON is still one tab away — it is the contract, and nothing
- * here replaces it.
+ * The dialog is the reason a filename is a link on both screens that list parses — Files
+ * and History: what a reader actually wants to check is whether the markdown came back
+ * right, and a `<pre>` of the whole envelope makes that a reading exercise. The JSON is
+ * still one tab away — it is the contract, and nothing here replaces it.
+ *
+ * It takes a title and a job error rather than a job row, because the two callers hold
+ * different shapes of the same thing: a `JobSummary` on History, a `LibraryDocument` on
+ * Files. Neither is this component's business — it renders a result.
  *
  * Two scroll axes again: a page rail on the left, one continuous document on the right.
  * They stay in sync in both directions, and the two mechanics that make that not fight each
@@ -23,16 +27,23 @@
  * them reactive would re-render the document on every scroll frame.
  */
 import type { ComponentPublicInstance } from 'vue'
-import type { JobResult, JobSummary } from '~/lib/api'
+import type { JobResult } from '~/lib/api'
 import { formatBbox, parseResultMarkdown } from '~/lib/markdown'
 
-const props = defineProps<{
-  job: JobSummary
-  result: JobResult | null
-  /** The result is still in flight, or failed — the body says so instead of the document. */
-  pending?: boolean
-  errorMessage?: string | null
-}>()
+const props = withDefaults(
+  defineProps<{
+    /** The document's name — the dialog's heading and its accessible name. */
+    title: string
+    result: JobResult | null
+    /** Why the parse itself failed, from the job. Outranks everything below it. */
+    error?: string | null
+    /** The result is still in flight, or failed — the body says so instead of the document. */
+    pending?: boolean
+    /** Why fetching the result failed, from the client. */
+    errorMessage?: string | null
+  }>(),
+  { error: null, errorMessage: null },
+)
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -120,7 +131,7 @@ const meta = computed(() => {
   if (!result) {
     return ''
   }
-  return t('jobs.resultMeta', {
+  return t('viewer.meta', {
     model: result.meta.model,
     pages: result.pages.length,
     bbox: result.meta.bbox_format,
@@ -138,16 +149,16 @@ const failedPages = computed(() => props.result?.errors ?? [])
 </script>
 
 <template>
-  <UiModal :title="job.filename" size="lg" tall flush @close="emit('close')">
+  <UiModal :title="title" size="lg" tall flush @close="emit('close')">
     <template #title>
-      <h2 class="doc-title">{{ job.filename }}</h2>
+      <h2 class="doc-title">{{ title }}</h2>
       <p v-if="meta" class="doc-meta mono">{{ meta }}</p>
     </template>
 
     <!-- A segmented pair, not two loose buttons: they are two views of one thing, and the
          shared border is what says so. -->
     <template #actions>
-      <div class="tabs" role="tablist" :aria-label="t('jobs.resultViews')">
+      <div class="tabs" role="tablist" :aria-label="t('viewer.views')">
         <button
           v-for="view in (['markdown', 'json'] as const)"
           :key="view"
@@ -158,13 +169,13 @@ const failedPages = computed(() => props.result?.errors ?? [])
           :aria-selected="tab === view ? 'true' : 'false'"
           @click="tab = view"
         >
-          {{ t(`jobs.view.${view}`) }}
+          {{ t(`viewer.view.${view}`) }}
         </button>
       </div>
     </template>
 
     <div class="body">
-      <UiBanner v-if="job.error" class="state" tone="error">{{ job.error }}</UiBanner>
+      <UiBanner v-if="error" class="state" tone="error">{{ error }}</UiBanner>
       <UiBanner v-else-if="errorMessage" class="state" tone="error">{{ errorMessage }}</UiBanner>
       <UiSkeleton v-else-if="pending" class="state" :rows="5" />
 
@@ -173,23 +184,23 @@ const failedPages = computed(() => props.result?.errors ?? [])
       <UiEmptyState
         v-else-if="!pages.length"
         class="state"
-        :title="t('jobs.resultEmpty')"
-        :body="t('jobs.resultEmptyBody')"
+        :title="t('viewer.empty')"
+        :body="t('viewer.emptyBody')"
       />
 
       <div v-else class="markdown" :class="{ degraded: failedPages.length > 0 }">
         <!-- Spans both columns: it is a fact about the document, not about one page. -->
         <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
           {{
-            t('jobs.resultDegraded', {
+            t('viewer.degraded', {
               count: failedPages.length,
               pages: failedPages.map((entry) => entry.page).join(', '),
             })
           }}
         </UiBanner>
 
-        <nav class="page-rail" :aria-label="t('jobs.pagesLabel')">
-          <p class="eyebrow sm page-rail-label">{{ t('jobs.pagesLabel') }}</p>
+        <nav class="page-rail" :aria-label="t('viewer.pagesLabel')">
+          <p class="eyebrow sm page-rail-label">{{ t('viewer.pagesLabel') }}</p>
           <button
             v-for="page in pages"
             :key="page.page"
@@ -199,9 +210,9 @@ const failedPages = computed(() => props.result?.errors ?? [])
             :aria-current="page.page === activePage ? 'true' : undefined"
             @click="goToPage(page.page)"
           >
-            <span>{{ t('jobs.pageN', { page: page.page }) }}</span>
+            <span>{{ t('viewer.pageN', { page: page.page }) }}</span>
             <span v-if="page.figureCount" class="page-figures">
-              {{ t('jobs.figureCount', { count: page.figureCount }) }}
+              {{ t('viewer.figureCount', { count: page.figureCount }) }}
             </span>
           </button>
         </nav>
@@ -214,7 +225,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
             class="page"
           >
             <p class="eyebrow sm page-marker" :class="{ current: page.page === activePage }">
-              {{ t('jobs.pageN', { page: page.page }) }}
+              {{ t('viewer.pageN', { page: page.page }) }}
             </p>
             <article class="prose">
               <template v-for="(block, index) in page.blocks" :key="index">
@@ -260,7 +271,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
                 <figure v-else class="md-figure">
                   <div class="figure-frame">
                     <UiIcon name="scan-text" />
-                    <span>{{ t('jobs.figurePending') }}</span>
+                    <span>{{ t('viewer.figurePending') }}</span>
                   </div>
                   <figcaption class="figure-caption mono">
                     <span>{{ block.caption || block.id }}</span>
