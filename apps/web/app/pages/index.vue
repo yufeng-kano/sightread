@@ -100,8 +100,11 @@ async function signInAsDeveloper() {
         <h1>{{ t('login.signIn') }}</h1>
         <p class="login-lede">{{ t('login.lede') }}</p>
 
-        <!-- A plain link, not a client OAuth call: the backend owns the redirect flow. -->
-        <a class="btn-google" href="/api/auth/login">
+        <!-- A plain link, not a client OAuth call: the backend owns the redirect flow. The
+             locale rides along because it lives in the URL everywhere else, and Google is
+             the one leg that would drop it: the callback returns the visitor to the web app
+             in the language they were reading this page in. -->
+        <a class="btn-google" :href="`/api/auth/login?locale=${encodeURIComponent(locale)}`">
           <svg class="btn-google-mark" viewBox="0 0 18 18" aria-hidden="true" focusable="false">
             <path
               fill="#4285F4"

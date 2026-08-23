@@ -20,7 +20,13 @@ from sqlalchemy.exc import IntegrityError
 from ..auth.api_keys import create_api_key
 from ..auth.crypto import encrypt_connection_key, encrypt_openrouter_key, mask_openrouter_key
 from ..auth.deps import AppSettings, CsrfGuard, DbSession, SessionUser
-from ..auth.oidc import DEV_USER_EMAIL, DEV_USER_SUB, POST_LOGIN_KEY, upsert_user
+from ..auth.oidc import (
+    DEV_USER_EMAIL,
+    DEV_USER_SUB,
+    POST_LOGIN_KEY,
+    POST_LOGIN_LOCALE_KEY,
+    upsert_user,
+)
 from ..auth.sessions import SESSION_COOKIE, SESSION_TTL, create_session, delete_session
 from ..db.models import (
     ApiKey,
@@ -70,9 +76,13 @@ def set_session_cookie(response: Response, token: str) -> None:
 
 
 @router.get("/auth/login")
-async def login(request: Request, settings: AppSettings):
+async def login(request: Request, settings: AppSettings, locale: str = ""):
     if not settings.google_oidc_configured:
         raise ApiError(503, "internal", "Google sign-in is not configured on this deployment")
+    # The web app's locale lives in its URL, so the Google round trip is the one leg that
+    # drops it. Parked here rather than round-tripped through Google's `state`, which
+    # authlib owns, and validated against an allowlist on the way out (docs/auth.md § 1).
+    request.session[POST_LOGIN_LOCALE_KEY] = locale
     return await request.app.state.oauth.google.authorize_redirect(
         request, f"{settings.app_url}/api/auth/callback"
     )
@@ -94,9 +104,15 @@ async def callback(request: Request, db: DbSession, settings: AppSettings):
     await db.commit()
 
     # A connector flow parks the authorize request that sent the user here; only a path on
-    # this origin is honoured, so a parked value can never become an open redirect.
+    # this origin is honoured, so a parked value can never become an open redirect. An
+    # ordinary web login goes back to the web app in the locale it was started from.
     parked = request.session.pop(POST_LOGIN_KEY, "")
-    destination = parked if parked.startswith("/oauth/authorize") else settings.web_url
+    locale = request.session.pop(POST_LOGIN_LOCALE_KEY, "")
+    destination = (
+        parked
+        if parked.startswith("/oauth/authorize")
+        else settings.web_url_for_locale(str(locale))
+    )
     response = RedirectResponse(destination, status_code=status.HTTP_302_FOUND)
     set_session_cookie(response, session_token)
     return response

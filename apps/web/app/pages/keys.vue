@@ -19,6 +19,8 @@ const createdKey = ref<CreatedApiKey | null>(null)
 /** The key the confirm dialog is asking about — revoking is irreversible. */
 const revokeTarget = ref<ApiKeySummary | null>(null)
 const revoking = ref(false)
+/** The panel the reveal is inserted into — it scrolls independently of the page. */
+const keysPanel = ref<{ scrollToTop: () => void } | null>(null)
 
 // The example's origin is this deployment's own; a placeholder until the client knows it.
 const origin = ref('https://<host>')
@@ -59,6 +61,11 @@ async function submitCreate() {
     newKeyName.value = ''
     showCreate.value = false
     await refresh()
+    // The plaintext is shown exactly once and is unrecoverable, so it must not be left
+    // above the fold: Create key lives in the rail, which is reachable at any scroll depth
+    // in this panel, and the reveal is inserted at the panel's top.
+    await nextTick()
+    keysPanel.value?.scrollToTop()
   } catch (error) {
     mutationError.value = await resolve(error)
   } finally {
@@ -104,7 +111,7 @@ async function confirmRevoke() {
     </UiRail>
 
     <UiRegion split ratio="1.35fr 1fr">
-      <UiPanel :title="t('keys.listTitle')" lead>
+      <UiPanel ref="keysPanel" :title="t('keys.listTitle')" lead>
         <template #meta>
           <span v-if="data">{{ t('keys.keyCount', { count: data.keys.length }) }}</span>
           <UiButton

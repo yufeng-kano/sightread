@@ -21,7 +21,8 @@ import { modelLabel, sortModelsRecommendedFirst } from '~/lib/models'
 
 definePageMeta({ middleware: 'authed' })
 
-const { t, locale } = useI18n()
+const { t, locale, locales } = useI18n()
+const switchLocalePath = useSwitchLocalePath()
 useHead(() => ({ title: t('settings.headTitle') }))
 
 const auth = useAuth()
@@ -126,18 +127,24 @@ function openConnectionCreate() {
 }
 
 /** The pencil: edits the selected connection, or the OpenRouter key when that is what is
- *  selected. */
+ *  selected. OpenRouter is `providerChoice === ''` — a *missing* row means the connections
+ *  list has not answered yet, and treating that as OpenRouter would open the key dialog
+ *  over someone's selected connection. The button is disabled in that window anyway; this
+ *  is the second lock. */
 function openProviderEdit() {
   connName.value = ''
   connUrl.value = ''
   connKey.value = ''
   connError.value = null
 
-  const row = selectedConnection.value
-  if (!row) {
+  if (providerChoice.value === '') {
     keyInput.value = ''
     keyError.value = null
     connectionModal.value = { mode: 'key' }
+    return
+  }
+  const row = selectedConnection.value
+  if (!row) {
     return
   }
   connName.value = row.name
@@ -629,8 +636,12 @@ async function removePrompt() {
                 </UiButton>
                 <UiButton
                   icon-only
-                  :label="selectedConnection ? t('settings.connectionEditTitle') : t('settings.keyDialogTitle')"
-                  :disabled="providerPending || connPending"
+                  :label="
+                    providerChoice === ''
+                      ? t('settings.keyDialogTitle')
+                      : t('settings.connectionEditTitle')
+                  "
+                  :disabled="providerPending || connPending || providerUnresolved"
                   @click="openProviderEdit"
                 >
                   <template #icon><UiIcon name="edit" /></template>
@@ -650,8 +661,21 @@ async function removePrompt() {
                 }}
               </p>
 
+              <!-- With no retry here a transient /models failure leaves the picker gone
+                   for good: nothing else calls this until the selected connection changes,
+                   and switching away clears the stored model. -->
               <UiBanner v-if="connectionModelsError" class="group-banner" tone="error">
                 {{ connectionModelsError }}
+                <template #actions>
+                  <UiButton
+                    size="sm"
+                    :loading="connectionModelsPending"
+                    @click="loadConnectionModels"
+                  >
+                    <template #icon><UiIcon name="refresh" /></template>
+                    {{ t('common.retry') }}
+                  </UiButton>
+                </template>
               </UiBanner>
               <UiSkeleton v-if="connectionModelsPending && !connectionModels" :rows="1" />
 
@@ -675,6 +699,15 @@ async function removePrompt() {
                     </option>
                   </UiSelect>
                 </UiField>
+                <UiButton
+                  v-if="connectionModels"
+                  icon-only
+                  :label="t('settings.connectionModelReload')"
+                  :loading="connectionModelsPending"
+                  @click="loadConnectionModels"
+                >
+                  <template #icon><UiIcon name="refresh" /></template>
+                </UiButton>
                 <UiButton
                   variant="danger"
                   :disabled="connPending"
@@ -836,6 +869,29 @@ async function removePrompt() {
 
             <UiBanner v-if="promptError" class="group-banner" tone="error">{{ promptError }}</UiBanner>
             <UiBanner v-else-if="promptMessage" class="group-banner" tone="ok">{{ promptMessage }}</UiBanner>
+          </section>
+
+          <!-- Language --------------------------------------------------- -->
+          <!--
+            The signed-in home for the locale choice. The sign-in footer is where a visitor
+            picks it, but that page is unreachable once you are in, and the shell's account
+            popover — which used to carry this — is gone. Real links, since the locale lives
+            in the URL and the choice should stay bookmarkable.
+          -->
+          <section class="group">
+            <h2 class="group-title">{{ t('nav.language') }}</h2>
+            <nav class="locales" :aria-label="t('nav.language')">
+              <NuxtLink
+                v-for="option in locales"
+                :key="option.code"
+                class="locale"
+                :class="{ active: option.code === locale }"
+                :to="switchLocalePath(option.code)"
+                :aria-current="option.code === locale ? 'true' : undefined"
+              >
+                {{ option.name }}
+              </NuxtLink>
+            </nav>
           </section>
         </div>
       </UiPanel>
@@ -1110,6 +1166,30 @@ async function removePrompt() {
 
 .group-banner {
   max-width: 72ch;
+}
+
+.locales {
+  display: inline-flex;
+  gap: var(--space-5);
+}
+
+.locale {
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.locale:hover {
+  color: var(--accent);
+}
+
+/* The same treatment as the sign-in footer: ink and a weight step, underlined in the
+   accent — the accent's one navigational use. */
+.locale.active {
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--accent);
 }
 
 /* --- Dialogs -------------------------------------------------------------- */

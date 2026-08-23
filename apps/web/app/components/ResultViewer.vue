@@ -114,6 +114,13 @@ const meta = computed(() => {
 })
 
 const json = computed(() => (props.result ? JSON.stringify(props.result, null, 2) : ''))
+
+/**
+ * Pages the pipeline could not transcribe. A job with some pages failed still finishes as
+ * `succeeded` and simply omits them from the markdown (docs/jobs.md), so without this the
+ * document reads as complete and the only evidence is in the JSON tab.
+ */
+const failedPages = computed(() => props.result?.errors ?? [])
 </script>
 
 <template>
@@ -156,7 +163,17 @@ const json = computed(() => (props.result ? JSON.stringify(props.result, null, 2
         :body="t('jobs.resultEmptyBody')"
       />
 
-      <div v-else class="markdown">
+      <div v-else class="markdown" :class="{ degraded: failedPages.length > 0 }">
+        <!-- Spans both columns: it is a fact about the document, not about one page. -->
+        <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
+          {{
+            t('jobs.resultDegraded', {
+              count: failedPages.length,
+              pages: failedPages.map((entry) => entry.page).join(', '),
+            })
+          }}
+        </UiBanner>
+
         <nav class="page-rail" :aria-label="t('jobs.pagesLabel')">
           <p class="eyebrow sm page-rail-label">{{ t('jobs.pagesLabel') }}</p>
           <button
@@ -190,6 +207,14 @@ const json = computed(() => (props.result ? JSON.stringify(props.result, null, 2
                 <h3 v-if="block.kind === 'h2'" class="md-h2">{{ block.text }}</h3>
                 <h4 v-else-if="block.kind === 'h3'" class="md-h3">{{ block.text }}</h4>
                 <p v-else-if="block.kind === 'p'" class="md-p">{{ block.text }}</p>
+
+                <component
+                  :is="block.ordered ? 'ol' : 'ul'"
+                  v-else-if="block.kind === 'list'"
+                  class="md-list"
+                >
+                  <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
+                </component>
 
                 <table v-else-if="block.kind === 'table'" class="md-table">
                   <thead>
@@ -300,8 +325,21 @@ const json = computed(() => (props.result ? JSON.stringify(props.result, null, 2
 .markdown {
   display: grid;
   grid-template-columns: 132px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   height: 100%;
+}
+
+/* A warning about the whole document sits above both columns and pushes them down, rather
+   than scrolling away inside one of them. */
+.markdown.degraded {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.degraded-note {
+  grid-column: 1 / -1;
+  border-inline: none;
+  border-top: none;
 }
 
 .page-rail {
@@ -410,6 +448,20 @@ const json = computed(() => (props.result ? JSON.stringify(props.result, null, 2
   font-size: var(--text-base);
   line-height: 1.75;
   text-wrap: pretty;
+}
+
+/* Markers stay outside the measure, so the text edge lines up with the paragraphs above
+   and below it rather than being indented away from them. */
+.md-list {
+  margin: 0;
+  padding-left: var(--space-5);
+  color: var(--ink-soft);
+  font-size: var(--text-base);
+  line-height: 1.75;
+}
+
+.md-list li + li {
+  margin-top: var(--space-2);
 }
 
 .md-table {

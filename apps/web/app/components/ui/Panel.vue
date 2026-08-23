@@ -34,6 +34,28 @@ defineSlots<{
   /** Right of the heading: this dataset's own metadata ("34 days recorded") or one small button. */
   meta?: () => unknown
 }>()
+
+const body = ref<HTMLElement | null>(null)
+
+/**
+ * Puts the top of the body back in view. A panel owns its own scroll axis, so something
+ * inserted at the top of it — the one-time key reveal — can land entirely above the
+ * viewport with nothing to tell the reader it is there.
+ *
+ * Both axes, because there are two: the body's own above the breakpoint, and the content
+ * region's below it, where the body no longer scrolls and the panel itself can be the part
+ * that is off-screen.
+ */
+function scrollToTop() {
+  const el = body.value
+  if (!el) {
+    return
+  }
+  el.scrollTo({ top: 0 })
+  el.scrollIntoView({ block: 'nearest' })
+}
+
+defineExpose({ scrollToTop })
 </script>
 
 <template>
@@ -45,7 +67,7 @@ defineSlots<{
       </div>
     </header>
 
-    <div class="panel-body" :class="{ section, flush }">
+    <div ref="body" class="panel-body" :class="{ section, flush }">
       <slot />
     </div>
   </section>

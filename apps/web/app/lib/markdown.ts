@@ -8,9 +8,9 @@
  * than being asked of an API whose contract is the markdown itself.
  *
  * This is deliberately not a general markdown parser. It understands exactly the shapes the
- * transcription prompt produces: headings, paragraphs, pipe tables and figure placeholders.
- * Anything else stays a paragraph, which renders as its own source text rather than
- * disappearing.
+ * transcription prompt asks the model for: headings, paragraphs, lists, pipe tables and
+ * figure placeholders (docs/parsing.md § Prompt). Anything else stays a paragraph, which
+ * renders as its own source text rather than disappearing.
  */
 
 /** `[ymin, xmin, ymax, xmax]`, 0–1000 normalized — the `bbox_format` the result declares. */
@@ -20,6 +20,7 @@ export type ResultBlock =
   | { kind: 'h2'; text: string }
   | { kind: 'h3'; text: string }
   | { kind: 'p'; text: string }
+  | { kind: 'list'; ordered: boolean; items: string[] }
   | { kind: 'table'; header: string[]; rows: string[][] }
   | { kind: 'fig'; id: string; bbox: Bbox; caption: string | null }
 
@@ -34,10 +35,30 @@ const PAGE_MARKER = /^<!--\s*page:\s*(\d+)\s*-->$/
 const FIGURE = /^!\[([^\]\n]*)\]\(\s*sightread:\/\/p(\d+)\/(-?\d+),(-?\d+),(-?\d+),(-?\d+)\s*\)$/
 const HEADING = /^(#{1,6})\s+(.*)$/
 const COMMENT = /^<!--.*-->$/
+/** `- item`, `* item`, `+ item`, `1. item`, `2) item`. */
+const LIST_ITEM = /^([-*+]|\d{1,9}[.)])\s+(.*)$/
 
 /** A pipe table's separator row: `| --- | :--: |`. */
 function isTableRule(line: string): boolean {
   return /^\|?[\s|:-]+\|[\s|:-]*$/.test(line) && line.includes('-')
+}
+
+/** `1.` and `2)` are ordered; `-`, `*` and `+` are not. */
+function isOrdered(marker: string): boolean {
+  return !'-*+'.includes(marker)
+}
+
+/** Every line that starts a block of its own — so a paragraph knows where to stop. */
+function startsBlock(line: string): boolean {
+  return (
+    !line ||
+    line.startsWith('|') ||
+    line.startsWith('#') ||
+    LIST_ITEM.test(line) ||
+    FIGURE.test(line) ||
+    PAGE_MARKER.test(line) ||
+    COMMENT.test(line)
+  )
 }
 
 function splitRow(line: string): string[] {
@@ -92,7 +113,7 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       // The caption is written verbatim on the next line, and only there — anything that
       // starts another block is the next block, not this figure's caption.
       const next = (lines[index + 1] ?? '').trim()
-      const captioned = next && !next.startsWith('|') && !next.startsWith('#') && !FIGURE.test(next) && !PAGE_MARKER.test(next) && !COMMENT.test(next)
+      const captioned = Boolean(next) && !startsBlock(next)
       if (captioned) {
         index += 1
       }
@@ -112,6 +133,28 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
         kind: (heading[1] ?? '').length >= 3 ? 'h3' : 'h2',
         text: (heading[2] ?? '').trim(),
       })
+      continue
+    }
+
+    // A list before the paragraph fallback: merged into prose, `- First` / `- Second`
+    // becomes the single line "- First - Second", losing both the structure and the
+    // markers the model was asked to produce.
+    const listItem = LIST_ITEM.exec(line)
+    if (listItem) {
+      const ordered = isOrdered(listItem[1] ?? '')
+      const items: string[] = []
+      let cursor = index
+      // One block per marker kind: a bulleted list directly under a numbered one is two
+      // lists, not one with a confused type.
+      for (; cursor < lines.length; cursor += 1) {
+        const match = LIST_ITEM.exec((lines[cursor] ?? '').trim())
+        if (!match || isOrdered(match[1] ?? '') !== ordered) {
+          break
+        }
+        items.push((match[2] ?? '').trim())
+      }
+      index = cursor - 1
+      page().blocks.push({ kind: 'list', ordered, items })
       continue
     }
 
@@ -136,7 +179,7 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
     let cursor = index + 1
     while (cursor < lines.length) {
       const next = (lines[cursor] ?? '').trim()
-      if (!next || next.startsWith('|') || next.startsWith('#') || FIGURE.test(next) || PAGE_MARKER.test(next) || COMMENT.test(next)) {
+      if (startsBlock(next)) {
         break
       }
       paragraph.push(next)

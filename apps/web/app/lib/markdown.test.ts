@@ -86,3 +86,43 @@ describe('formatBbox', () => {
     expect(formatBbox([120, 60, 480, 940])).toBe('[120,60,480,940]')
   })
 })
+
+describe('parseResultMarkdown lists', () => {
+  it('keeps an unordered list as its own block instead of merging it into a paragraph', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'Findings:', '', '- First', '- Second', '- Third'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'p', text: 'Findings:' },
+      { kind: 'list', ordered: false, items: ['First', 'Second', 'Third'] },
+    ])
+  })
+
+  it('reads an ordered list and its markers', () => {
+    const pages = parseResultMarkdown(['<!-- page: 1 -->', '1. Alpha', '2) Beta'].join('\n'))
+
+    expect(pages[0]!.blocks).toEqual([{ kind: 'list', ordered: true, items: ['Alpha', 'Beta'] }])
+  })
+
+  it('splits a bulleted list that follows a numbered one into two blocks', () => {
+    const pages = parseResultMarkdown(['<!-- page: 1 -->', '1. Alpha', '- Beta'].join('\n'))
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'list', ordered: true, items: ['Alpha'] },
+      { kind: 'list', ordered: false, items: ['Beta'] },
+    ])
+  })
+
+  it('does not let a paragraph swallow the list that follows it', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', 'The regions were:', '- APAC', 'Totals follow.'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'p', text: 'The regions were:' },
+      { kind: 'list', ordered: false, items: ['APAC'] },
+      { kind: 'p', text: 'Totals follow.' },
+    ])
+  })
+})

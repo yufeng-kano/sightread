@@ -22,6 +22,11 @@ DEV_USER_SUB = "dev-local"
 # `/oauth/authorize` when a connector flow needs a web session first (docs/auth.md § 4).
 POST_LOGIN_KEY = "post_login_path"
 
+# The locale the visitor was reading the sign-in page in, parked across the Google round
+# trip so the callback can return them to the same one. Google is the only leg that loses
+# it: the locale otherwise lives in the URL (docs/auth.md § 1).
+POST_LOGIN_LOCALE_KEY = "post_login_locale"
+
 
 def build_oauth(settings: Settings) -> OAuth:
     oauth = OAuth()

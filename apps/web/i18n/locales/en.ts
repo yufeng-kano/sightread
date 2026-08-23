@@ -28,6 +28,7 @@ export default {
     loading: 'Loading…',
     never: 'Never used',
     notSet: 'Not set',
+    retry: 'Retry',
   },
   errors: {
     network: 'Could not reach the server.',
@@ -128,6 +129,7 @@ export default {
     connectionDeleteConfirm:
       'Delete this connection? Parsing falls back to OpenRouter until another provider is picked.',
     connectionModelLabel: 'Model',
+    connectionModelReload: 'Reload models',
     keyDialogTitle: 'API Key',
     openrouterStored: 'Stored key {masked}, updated {updated}.',
     openrouterLabel: 'API key',
@@ -182,6 +184,8 @@ export default {
     resultMeta: '{model} · {pages} pages · bbox {bbox}',
     resultEmpty: 'Nothing to show yet.',
     resultEmptyBody: 'This job has not produced any markdown — check the JSON view for what came back.',
+    resultDegraded:
+      'Incomplete: {count} of this document’s pages failed to parse and are missing below (page {pages}). The JSON view carries the reason.',
     pagesLabel: 'Pages',
     pageN: 'Page {page}',
     figureCount: '{count} fig',

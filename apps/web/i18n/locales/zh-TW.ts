@@ -27,6 +27,7 @@ export default {
     loading: '載入中…',
     never: '未使用過',
     notSet: '未設定',
+    retry: '重試',
   },
   errors: {
     network: '無法連線到伺服器。',
@@ -125,6 +126,7 @@ export default {
     connectionDelete: '刪除連線',
     connectionDeleteConfirm: '要刪除這個連線嗎？在選擇其他供應端前，解析會改回使用 OpenRouter。',
     connectionModelLabel: '模型',
+    connectionModelReload: '重新載入模型清單',
     keyDialogTitle: 'API 金鑰',
     openrouterStored: '已儲存金鑰 {masked}，更新於 {updated}。',
     openrouterLabel: 'API 金鑰',
@@ -179,6 +181,7 @@ export default {
     resultMeta: '{model} · {pages} 頁 · bbox {bbox}',
     resultEmpty: '目前沒有可顯示的內容。',
     resultEmptyBody: '這筆工作沒有產出 Markdown — 可切換到 JSON 檢視查看回傳內容。',
+    resultDegraded: '內容不完整：這份文件有 {count} 頁解析失敗，未包含在下方（第 {pages} 頁）。失敗原因可在 JSON 檢視查看。',
     pagesLabel: '頁面',
     pageN: '第 {page} 頁',
     figureCount: '{count} 張圖',
