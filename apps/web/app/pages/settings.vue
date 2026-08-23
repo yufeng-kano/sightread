@@ -22,7 +22,6 @@ import { modelLabel, sortModelsRecommendedFirst } from '~/lib/models'
 definePageMeta({ middleware: 'authed' })
 
 const { t, locale } = useI18n()
-useHead(() => ({ title: t('settings.headTitle') }))
 
 const auth = useAuth()
 const { resolve } = useApiError()
@@ -660,37 +659,26 @@ async function removePrompt() {
                 >
                   <template #icon><UiIcon name="edit" /></template>
                 </UiButton>
-              </div>
-            </div>
-
-            <!-- A custom connection is a profile of its own: its address, key and model
-                 on one read-only line, and its deletion. Everything editable lives in
-                 the dialog. -->
-            <template v-if="selectedConnection">
-              <p class="state">
-                {{
-                  t('settings.connectionState', {
-                    url: selectedConnection.base_url,
-                    masked: selectedConnection.masked,
-                    model: selectedConnection.model ?? t('common.notSet'),
-                  })
-                }}
-              </p>
-
-              <div class="controls">
+                <!-- A connection's deletion, beside the pencil that edits it. Icon-only:
+                     the ConfirmDialog behind it carries the visible words. The connection
+                     itself has no inline state line — its profile is read in the rail
+                     summary and edited in the dialog. -->
                 <UiButton
+                  v-if="selectedConnection"
+                  icon-only
                   variant="danger"
+                  :label="t('settings.connectionDelete')"
                   :disabled="connPending"
                   @click="confirmingConnectionDelete = true"
                 >
-                  {{ t('settings.connectionDelete') }}
+                  <template #icon><UiIcon name="trash" /></template>
                 </UiButton>
               </div>
-            </template>
+            </div>
 
             <!-- OpenRouter's own read-only line: only the stored state is worth one.
                  Absence explains itself — the dialog asks for a key. -->
-            <template v-else-if="!providerUnresolved">
+            <template v-if="!selectedConnection && !providerUnresolved">
               <p v-if="openrouterKey?.present && openrouterKey.updated_at" class="state">
                 {{
                   t('settings.openrouterStored', {

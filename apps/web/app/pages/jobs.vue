@@ -7,7 +7,6 @@ definePageMeta({ middleware: 'authed' })
 const JOB_LIMIT = 50
 
 const { t, locale } = useI18n()
-useHead(() => ({ title: t('jobs.headTitle') }))
 
 const { data, pending, errorMessage, refresh } = useAuthedData(() => listJobs(JOB_LIMIT))
 const { resolve } = useApiError()

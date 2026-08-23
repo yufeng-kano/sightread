@@ -121,7 +121,6 @@ export default {
       '任何 OpenAI 相容的 Chat Completions base URL。儲存前會以該端點的 /models 驗證金鑰。',
     connectionKeyLabel: 'API 金鑰',
     connectionKeyKeepNote: '留空表示沿用已儲存的金鑰。',
-    connectionState: '{url} · 金鑰 {masked} · {model}',
     connectionSaved: '連線驗證成功並已儲存。',
     connectionDelete: '刪除連線',
     connectionDeleteConfirm: '要刪除這個連線嗎？在選擇其他供應端前，解析會改回使用 OpenRouter。',

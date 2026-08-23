@@ -1,7 +1,11 @@
 <script setup lang="ts">
 const localeHead = useLocaleHead({ seo: true })
+const { t } = useI18n()
 
 useHead(() => ({
+  // One tab title for the whole app — pages do not set their own, so switching
+  // tabs never renames the tab. The sign-in page's SEO meta is the one override.
+  title: t('app.name'),
   htmlAttrs: { lang: localeHead.value.htmlAttrs?.lang },
   link: [...(localeHead.value.link || [])],
   meta: [...(localeHead.value.meta || [])],
