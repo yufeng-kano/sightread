@@ -60,26 +60,33 @@ def _oauth_error(status_code: int, error: str, description: str) -> JSONResponse
 # all, behind a strict connector CSP) is worse than no mark.
 MARK = (
     "<svg class='mark' viewBox='0 0 32 32' width='28' height='28' aria-hidden='true'>"
-    "<rect width='32' height='32' rx='6' fill='#1f5fd6'/>"
-    "<rect x='8' y='7' width='16' height='18' rx='2' fill='#ffffff'/>"
-    "<rect x='11' y='11' width='10' height='6' rx='1' fill='#1f5fd6'/>"
-    "<rect x='11' y='19' width='10' height='2' rx='1' fill='#1f5fd6'/>"
+    "<rect width='32' height='32' rx='5' fill='#17607d'/>"
+    "<g fill='none' stroke='#fcfcfd' stroke-width='2.2' stroke-linecap='round'"
+    " stroke-linejoin='round'>"
+    "<path d='M8 11V9.5A1.5 1.5 0 0 1 9.5 8H11'/>"
+    "<path d='M21 8h1.5A1.5 1.5 0 0 1 24 9.5V11'/>"
+    "<path d='M24 21v1.5a1.5 1.5 0 0 1-1.5 1.5H21'/>"
+    "<path d='M11 24H9.5A1.5 1.5 0 0 1 8 22.5V21'/>"
+    "<path d='M11.5 12.5h6M11.5 16h9M11.5 19.5h4.5'/>"
+    "</g>"
     "</svg>"
 )
 
-# The web app's tokens (apps/web/app/assets/css/main.css), narrowed to what one card needs.
-# Duplicated on purpose: FastAPI renders this page, so it cannot import the Nuxt stylesheet,
-# and pulling one in over the network would make consent depend on the web app being up.
+# The web app's Graphite tokens (apps/web/app/assets/css/main.css), narrowed to what one card
+# needs. Duplicated on purpose: FastAPI renders this page, so it cannot import the Nuxt
+# stylesheet, and pulling one in over the network would make consent depend on the web app
+# being up. The heading names Source Serif 4 without loading it — everything this page needs
+# ships in the document, so it renders in the Georgia fallback rather than blocking consent
+# on a font request a connector webview's CSP may refuse.
 PAGE_STYLE = """
 :root{color-scheme:light dark;
---bg:#f4f4f5;--surface:#fff;--border:#e4e4e7;--text:#18181b;--muted:#52525b;--faint:#6b6b74;
---accent:#18181b;--accent-fg:#fafafa;--accent-hover:#27272a;--hover:#f4f4f5;
---ring-border:#71717a;--ring:0 0 0 3px rgb(24 24 27 / 6%);
---shadow:0 1px 2px rgb(0 0 0 / 4%),0 4px 12px rgb(0 0 0 / 4%)}
+--bg:#eceef0;--surface:#fcfcfd;--border:#e4e8ec;--text:#15181c;--muted:#4b5157;--faint:#5c636a;
+--accent:#17607d;--accent-fg:#fcfcfd;--accent-hover:#124f68;--hover:#f2f4f6;
+--edge:#cdd3d9}
 @media(prefers-color-scheme:dark){:root{
---bg:#09090b;--surface:#131316;--border:#27272a;--text:#fafafa;--muted:#a1a1aa;--faint:#8b8b95;
---accent:#fafafa;--accent-fg:#18181b;--accent-hover:#e4e4e7;--hover:#27272a;
---shadow:0 1px 2px rgb(0 0 0 / 24%),0 4px 12px rgb(0 0 0 / 24%)}}
+--bg:#0e1114;--surface:#16191d;--border:#272c32;--text:#eef1f4;--muted:#aeb6bd;--faint:#949ca4;
+--accent:#6aa9c4;--accent-fg:#10161a;--accent-hover:#8bbed4;--hover:#1b1f24;
+--edge:#454c55}}
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
 background:var(--bg);color:var(--text);
@@ -87,29 +94,30 @@ font:400 14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,
 "Noto Sans TC",sans-serif;
 -webkit-font-smoothing:antialiased}
 .card{width:100%;max-width:26rem;background:var(--surface);border:1px solid var(--border);
-border-radius:14px;box-shadow:var(--shadow);padding:24px}
+padding:24px}
 .head{display:flex;align-items:center;gap:12px;margin-bottom:16px}
-.mark{flex:none;border-radius:6px}
-h1{margin:0;font-size:16px;font-weight:600;letter-spacing:-0.02em}
+.mark{flex:none;border-radius:5px}
+h1{margin:0;font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;
+letter-spacing:-0.02em}
 p{margin:0 0 12px}
 strong{font-weight:600}
 .note{color:var(--muted);font-size:13px}
 code{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-background:var(--hover);border-radius:4px;padding:1px 5px}
+background:var(--hover);border-radius:3px;padding:1px 5px}
 /* The billing line is the one fact a user can be surprised by later, so it is set apart
    from the sentence above it rather than buried at the end of it. */
-.terms{margin:16px 0 0;padding:12px;border:1px solid var(--border);border-radius:10px;
+.terms{margin:16px 0 0;padding:12px;border:1px solid var(--border);
 color:var(--muted);font-size:13px}
 .actions{display:flex;gap:8px;margin-top:20px}
-button{flex:1;height:34px;padding:0 14px;border-radius:6px;cursor:pointer;
+button{flex:1;height:36px;padding:0 14px;border-radius:3px;cursor:pointer;
 font:500 14px/1 inherit;font-family:inherit;
 transition:background-color 120ms cubic-bezier(.72,0,.16,1),
            border-color 120ms cubic-bezier(.72,0,.16,1)}
 @media(pointer:coarse){button{height:40px}}
-button:focus-visible{outline:none;border-color:var(--ring-border);box-shadow:var(--ring)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .approve{border:1px solid var(--accent);background:var(--accent);color:var(--accent-fg)}
 .approve:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
-.deny{border:1px solid var(--border);background:var(--surface);color:var(--text)}
+.deny{border:1px solid var(--edge);background:var(--surface);color:var(--text)}
 .deny:hover{background:var(--hover)}
 """
 

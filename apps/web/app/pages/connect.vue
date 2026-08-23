@@ -9,41 +9,99 @@ const mcpUrl = ref('https://<host>/mcp')
 onMounted(() => {
   mcpUrl.value = `${window.location.origin}/mcp`
 })
+
+/** Numbered rather than bulleted: the order is the point — the URL, then the consent, then
+ *  what Claude does with it. */
+const STEPS = ['connect.step1', 'connect.step2', 'connect.step3'] as const
 </script>
 
 <template>
-  <div class="page">
-    <UiPageHeader :title="t('connect.headTitle')" />
+  <UiScreen>
+    <UiRail>
+      <UiPageHeader :eyebrow="t('connect.eyebrow')" :title="t('connect.headTitle')" size="md" />
+    </UiRail>
 
-    <UiCard :title="t('connect.mcpTitle')">
-      <div class="connect">
-        <UiCopyField :value="mcpUrl" />
-        <!-- The one sentence that matters: the connector authorizes over OAuth, so there is
-             no key to paste — which is exactly why it does not live on the keys page. -->
-        <p class="note">{{ t('connect.mcpBody') }}</p>
-      </div>
-    </UiCard>
-  </div>
+    <UiRegion>
+      <UiPanel section>
+        <h2 class="heading">{{ t('connect.mcpTitle') }}</h2>
+        <div class="endpoint">
+          <span class="endpoint-url mono">{{ mcpUrl }}</span>
+          <UiCopyButton :text="mcpUrl" variant="secondary" size="sm" labelled />
+        </div>
+
+        <p class="eyebrow steps-label">{{ t('connect.howTitle') }}</p>
+        <ol class="steps">
+          <li v-for="(step, index) in STEPS" :key="step" class="step">
+            <span class="step-number tabular">{{ String(index + 1).padStart(2, '0') }}</span>
+            <p class="step-body">{{ t(step) }}</p>
+          </li>
+        </ol>
+      </UiPanel>
+    </UiRegion>
+  </UiScreen>
 </template>
 
 <style scoped>
-/* Same measure as Settings: a form page, not a table page. No gap on the page itself —
-   UiPageHeader carries its own bottom margin. */
-.page {
+.heading {
+  font-size: var(--display-sm);
+  letter-spacing: normal;
+}
+
+/* Rule-bounded rather than boxed — the same treatment every value in this design gets. */
+.endpoint {
   display: flex;
-  flex-direction: column;
-  max-width: 56rem;
-  width: 100%;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
 }
 
-.connect {
+.endpoint-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-base);
+  color: var(--ink);
+}
+
+.steps-label {
+  margin-top: var(--space-9);
+}
+
+.steps {
+  list-style: none;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+}
+
+.step {
   display: grid;
-  gap: var(--space-3);
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--hair);
 }
 
-.note {
+.step:last-child {
+  border-bottom: 1px solid var(--hair);
+}
+
+/* The step number is the only accent on this page: it is the sequence, which is the data
+   the page carries. */
+.step-number {
+  font-family: var(--font-display);
+  font-size: var(--display-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--accent);
+}
+
+.step-body {
+  max-width: 60ch;
   color: var(--muted);
-  font-size: var(--text-sm);
-  max-width: 72ch;
+  line-height: 1.7;
 }
 </style>

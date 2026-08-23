@@ -10,15 +10,18 @@
  * action can never be fired twice; the label stays put so the button does not resize
  * mid-press.
  *
- * Every size is driven by `--control-height` (or a fixed step off it), so a button beside
- * an input is the same box — see docs/web.md § Rules.
+ * Every size is a control-height token, so a button beside an input is the same box — see
+ * docs/web.md § Design system.
  */
 const props = withDefaults(
   defineProps<{
     variant?: 'primary' | 'secondary' | 'ghost' | 'danger'
-    size?: 'sm' | 'md'
+    /** 36px, 30px and 26px — the three control heights this design gives a button. */
+    size?: 'xs' | 'sm' | 'md'
     /** Square button with an icon and no visible label — `label` becomes its accessible name. */
     iconOnly?: boolean
+    /** Fills its container's width, for a rail's single primary action. */
+    block?: boolean
     loading?: boolean
     disabled?: boolean
     /**
@@ -65,7 +68,11 @@ const bindings = computed(() => {
   <component
     :is="tag"
     class="btn"
-    :class="[`btn-${variant}`, `btn-${size}`, { 'btn-icon': iconOnly, 'is-loading': loading }]"
+    :class="[
+      `btn-${variant}`,
+      `btn-${size}`,
+      { 'btn-icon': iconOnly, 'btn-block': block, 'is-loading': loading },
+    ]"
     :aria-label="label"
     :title="iconOnly ? label : undefined"
     :aria-busy="loading ? 'true' : undefined"
@@ -84,10 +91,12 @@ const bindings = computed(() => {
   justify-content: center;
   gap: var(--space-2);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   font-weight: var(--weight-medium);
   white-space: nowrap;
   cursor: pointer;
+  /* Color and background only — this design has no hover elevation and no transforms
+     (docs/web.md § Design system). */
   transition:
     background var(--duration-fast) var(--ease),
     border-color var(--duration-fast) var(--ease),
@@ -101,7 +110,13 @@ const bindings = computed(() => {
 }
 
 .btn-sm {
-  height: calc(var(--control-height) - 6px);
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+.btn-xs {
+  height: var(--control-height-xs);
   padding: 0 var(--space-2);
   font-size: var(--text-xs);
 }
@@ -116,7 +131,16 @@ const bindings = computed(() => {
 }
 
 .btn-icon.btn-sm {
-  width: calc(var(--control-height) - 6px);
+  width: var(--control-height-sm);
+}
+
+.btn-icon.btn-xs {
+  width: var(--control-height-xs);
+}
+
+/* Fills the rail it sits in — the primary action on a screen whose rail holds one. */
+.btn-block {
+  width: 100%;
 }
 
 .btn:disabled,
@@ -133,6 +157,7 @@ const bindings = computed(() => {
   cursor: progress;
 }
 
+/* The accent's one non-data use: the control that commits a change. */
 .btn-primary {
   background: var(--accent);
   color: var(--accent-fg);
@@ -143,34 +168,35 @@ const bindings = computed(() => {
 }
 
 .btn-secondary {
-  background: var(--surface);
-  color: var(--text);
-  border-color: var(--border-strong);
+  background: var(--paper);
+  color: var(--ink);
+  border-color: var(--edge);
 }
 
 .btn-secondary:hover {
-  background: var(--surface-2);
-  border-color: var(--faint);
+  background: var(--rail);
 }
 
 .btn-ghost {
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--muted);
 }
 
 .btn-ghost:hover {
-  background: var(--hover);
-  color: var(--text);
+  background: var(--rail);
+  color: var(--ink);
 }
 
+/* Destructive: the word in danger over a danger-edge hairline, never a filled red slab —
+   a revoke button sits in a table row and must not shout down the row it belongs to. */
 .btn-danger {
-  background: var(--surface);
+  background: var(--paper);
   color: var(--danger);
-  border-color: var(--danger-border);
+  border-color: var(--danger-edge);
 }
 
 .btn-danger:hover {
-  background: var(--danger-bg);
+  background: var(--danger-hover);
 }
 
 .btn-spinner {
@@ -183,8 +209,9 @@ const bindings = computed(() => {
   height: 15px;
 }
 
-.btn-sm :deep(svg) {
-  width: 14px;
-  height: 14px;
+.btn-sm :deep(svg),
+.btn-xs :deep(svg) {
+  width: 13px;
+  height: 13px;
 }
 </style>

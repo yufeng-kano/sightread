@@ -1,0 +1,88 @@
+import { describe, expect, it } from 'vitest'
+import { formatBbox, parseResultMarkdown } from './markdown'
+
+describe('parseResultMarkdown', () => {
+  it('splits on page markers and keeps block order', () => {
+    const pages = parseResultMarkdown(
+      [
+        '<!-- page: 1 -->',
+        '## Quarterly results',
+        '',
+        'Revenue grew across every region,',
+        'led by APAC.',
+        '',
+        '<!-- page: 2 -->',
+        '### Notes',
+        '| Region | Revenue |',
+        '| --- | --- |',
+        '| APAC | 1,204 |',
+        '| EMEA | 903 |',
+      ].join('\n'),
+    )
+
+    expect(pages.map((page) => page.page)).toEqual([1, 2])
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'h2', text: 'Quarterly results' },
+      { kind: 'p', text: 'Revenue grew across every region, led by APAC.' },
+    ])
+    expect(pages[1]!.blocks).toEqual([
+      { kind: 'h3', text: 'Notes' },
+      {
+        kind: 'table',
+        header: ['Region', 'Revenue'],
+        rows: [
+          ['APAC', '1,204'],
+          ['EMEA', '903'],
+        ],
+      },
+    ])
+  })
+
+  it('reads a figure placeholder and the caption on the next line', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 3 -->', '![fig1](sightread://p3/120,60,480,940)', 'Figure 1: revenue by region'].join('\n'),
+    )
+
+    expect(pages[0]!.figureCount).toBe(1)
+    expect(pages[0]!.blocks).toEqual([
+      {
+        kind: 'fig',
+        id: 'fig1',
+        bbox: [120, 60, 480, 940],
+        caption: 'Figure 1: revenue by region',
+      },
+    ])
+  })
+
+  it('leaves a figure uncaptioned when the next line starts another block', () => {
+    const pages = parseResultMarkdown(
+      ['<!-- page: 1 -->', '![fig1](sightread://p1/0,0,10,10)', '## Next section'].join('\n'),
+    )
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'fig', id: 'fig1', bbox: [0, 0, 10, 10], caption: null },
+      { kind: 'h2', text: 'Next section' },
+    ])
+  })
+
+  it('keeps content that precedes the first marker as page 1', () => {
+    const pages = parseResultMarkdown(['# Title', '<!-- page: 1 -->', 'Body.'].join('\n'))
+
+    expect(pages).toHaveLength(1)
+    expect(pages[0]!.page).toBe(1)
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'h2', text: 'Title' },
+      { kind: 'p', text: 'Body.' },
+    ])
+  })
+
+  it('returns nothing for an empty document', () => {
+    expect(parseResultMarkdown('')).toEqual([])
+  })
+})
+
+describe('formatBbox', () => {
+  it('prints the four coordinates in the stored order', () => {
+    expect(formatBbox([120, 60, 480, 940])).toBe('[120,60,480,940]')
+  })
+})

@@ -2,15 +2,16 @@
 /**
  * The one surface a signed-out visitor sees, and still the app's SEO page.
  *
- * Two columns: a brand panel that says what this is, and the sign-in panel. The brand panel
- * is deliberately dark in *both* themes — the single exception to the token palette — so it
- * carries its own local `--brand-*` values rather than `--surface`, and spells its mark out
- * instead of reusing `AppBrand`, whose mark is `--accent` on `--accent-fg` and would vanish
- * against it in light mode.
+ * Two columns: an ink brand panel that says what this is, and the sign-in panel. The brand
+ * panel is deliberately dark in *both* themes — the single exception to the token palette —
+ * so it carries its own local `--panel-*` values rather than reading `--paper`.
  *
  * The Google button is the other prescribed surface: white background, `#dadce0` border, the
  * official four-color mark inlined as SVG (never a remote asset), and Google's own dark
  * variant. Those values are Google's to set, not ours to tokenize.
+ *
+ * The locale links live here rather than in the signed-in shell: this is the page a visitor
+ * lands on, and it is the last point where the choice costs nothing.
  *
  * Full-bleed, so the page owns its frame rather than sitting in a layout.
  */
@@ -18,8 +19,9 @@ import { devLogin, isDevLoginAvailable } from '~/lib/api'
 
 definePageMeta({ layout: false })
 
-const { t } = useI18n()
+const { t, locale, locales } = useI18n()
 const localePath = useLocalePath()
+const switchLocalePath = useSwitchLocalePath()
 const auth = useAuth()
 const { resolve } = useApiError()
 
@@ -70,20 +72,31 @@ async function signInAsDeveloper() {
   <div class="login-page">
     <aside class="login-brand">
       <div class="login-brand-inner">
-        <div class="login-logo">
-          <span class="login-mark" aria-hidden="true">sr</span>
-          <span class="login-wordmark">{{ t('app.name') }}</span>
-        </div>
+        <AppBrand size="lg" />
 
         <div class="login-pitch">
           <h2>{{ t('login.pitchTitle') }}</h2>
           <p>{{ t('login.pitchBody') }}</p>
         </div>
+
+        <!-- Two facts, not a feature list: what you talk to it with, and whose money pays
+             for the vision calls. -->
+        <dl class="login-facts">
+          <div class="fact">
+            <dt>{{ t('login.factInterfaces') }}</dt>
+            <dd>{{ t('login.factInterfacesValue') }}</dd>
+          </div>
+          <div class="fact">
+            <dt>{{ t('login.factBilling') }}</dt>
+            <dd>{{ t('login.factBillingValue') }}</dd>
+          </div>
+        </dl>
       </div>
     </aside>
 
     <main class="login-panel">
       <div class="login-form">
+        <p class="eyebrow">{{ t('login.account') }}</p>
         <h1>{{ t('login.signIn') }}</h1>
         <p class="login-lede">{{ t('login.lede') }}</p>
 
@@ -111,7 +124,7 @@ async function signInAsDeveloper() {
         </a>
 
         <div v-if="devLoginAvailable" class="login-dev">
-          <UiButton :loading="signingIn" @click="signInAsDeveloper">
+          <UiButton class="dev-button" :loading="signingIn" @click="signInAsDeveloper">
             {{ t('login.devSignIn') }}
           </UiButton>
           <!-- Set to be read rather than shrunk and greyed: it is the one thing that explains
@@ -126,7 +139,21 @@ async function signInAsDeveloper() {
 
       <footer class="login-footer">
         <span>{{ t('login.copyright', { year, name: t('app.name') }) }}</span>
-        <LocaleSwitch />
+        <!-- Each option is written in its own language, so it is legible whichever catalog
+             is loaded. Real links: the locale lives in the URL, so the choice is
+             bookmarkable and works without JavaScript on this prerendered page. -->
+        <nav class="locales" :aria-label="t('nav.language')">
+          <NuxtLink
+            v-for="option in locales"
+            :key="option.code"
+            class="locale"
+            :class="{ active: option.code === locale }"
+            :to="switchLocalePath(option.code)"
+            :aria-current="option.code === locale ? 'true' : undefined"
+          >
+            {{ option.name }}
+          </NuxtLink>
+        </nav>
       </footer>
     </main>
   </div>
@@ -137,44 +164,36 @@ async function signInAsDeveloper() {
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
   min-height: 100dvh;
+  background: var(--paper);
 }
 
 /* --- Brand panel (intentionally dark in both themes) ----------------------- */
 
 .login-brand {
-  --brand-bg: #0b0b0f;
-  --brand-text: #fafafa;
-  --brand-muted: #a1a1aa;
-  --brand-line: rgb(255 255 255 / 5%);
+  --panel-bg: #15181c;
+  --panel-text: #eef1f4;
+  --panel-muted: #aeb6bd;
+  --panel-label: #9aa3ab;
+  --panel-rule: rgb(255 255 255 / 12%);
+  --panel-grid: rgb(255 255 255 / 4%);
 
   position: relative;
   overflow: hidden;
   display: flex;
   align-items: center;
-  padding: var(--space-12);
-  color: var(--brand-text);
-  background:
-    radial-gradient(ellipse 110% 75% at 10% -10%, rgb(255 255 255 / 7%) 0%, transparent 62%),
-    radial-gradient(ellipse 80% 60% at 95% 110%, rgb(255 255 255 / 4%) 0%, transparent 58%),
-    var(--brand-bg);
+  padding: var(--space-14);
+  color: var(--panel-text);
+  background: var(--panel-bg);
 }
 
-/* Fine grid texture. The mask fades it out well before the panel edges so the texture never
-   terminates on a visible line. */
+/* Vertical grid lines only — a ruled page rather than a texture. Clipped by the panel's own
+   `overflow: hidden` and inert to the pointer. */
 .login-brand::before {
   content: '';
   position: absolute;
-  inset: -10%;
-  background-image:
-    linear-gradient(var(--brand-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--brand-line) 1px, transparent 1px);
-  background-size: 56px 56px;
-  mask-image: radial-gradient(
-    ellipse 95% 85% at 12% 6%,
-    #000 0%,
-    rgb(0 0 0 / 55%) 42%,
-    transparent 78%
-  );
+  inset: 0;
+  background-image: linear-gradient(90deg, var(--panel-grid) 1px, transparent 1px);
+  background-size: 118px 100%;
   pointer-events: none;
 }
 
@@ -183,49 +202,51 @@ async function signInAsDeveloper() {
 .login-brand-inner {
   position: relative;
   display: grid;
-  gap: var(--space-10);
-  width: min(460px, 100%);
+  gap: var(--space-11);
+  width: min(470px, 100%);
   margin-left: auto;
 }
 
-.login-logo {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.login-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: var(--space-10);
-  height: var(--space-10);
-  border-radius: var(--radius);
-  background: var(--brand-text);
-  color: var(--brand-bg);
-  font-size: var(--text-md);
-  font-weight: var(--weight-bold);
-  letter-spacing: var(--tracking-tighter);
-}
-
-.login-wordmark {
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-tight);
+/* The mark keeps the accent square here too — this is the brand, not the palette. */
+.login-brand :deep(.brand) {
+  color: var(--panel-text);
 }
 
 .login-pitch h2 {
-  margin: 0 0 var(--space-3);
-  font-size: var(--text-2xl);
-  line-height: 1.18;
-  letter-spacing: var(--tracking-tighter);
+  margin-bottom: var(--space-5);
+  font-size: var(--display-3xl);
+  line-height: 1.14;
   text-wrap: balance;
 }
 
 .login-pitch p {
-  max-width: 42ch;
-  line-height: 1.65;
-  color: var(--brand-muted);
+  max-width: 44ch;
+  line-height: 1.7;
+  color: var(--panel-muted);
+}
+
+.login-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+  margin: 0;
+  padding-top: var(--space-7);
+  border-top: 1px solid var(--panel-rule);
+}
+
+.fact dt {
+  margin-bottom: var(--space-2);
+  font-size: var(--text-3xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-facts);
+  text-transform: uppercase;
+  color: var(--panel-label);
+}
+
+.fact dd {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--display-sm);
 }
 
 /* --- Sign-in panel -------------------------------------------------------- */
@@ -235,23 +256,23 @@ async function signInAsDeveloper() {
      bottom edge like a normal site footer. */
   display: grid;
   grid-template-rows: 1fr auto;
-  padding: var(--space-12) var(--space-12) var(--space-8);
-  background: var(--surface);
+  padding: var(--space-14) var(--space-14) var(--space-8);
+  background: var(--paper);
 }
 
 .login-form {
-  width: min(360px, 100%);
+  width: min(370px, 100%);
   align-self: center;
 }
 
 .login-form h1 {
-  margin-bottom: var(--space-1);
-  font-size: var(--text-xl);
-  letter-spacing: var(--tracking-tighter);
+  margin-top: var(--space-3);
+  font-size: var(--display-xl);
 }
 
 .login-lede {
-  margin-bottom: var(--space-6);
+  margin-top: var(--space-2);
+  margin-bottom: var(--space-7);
   color: var(--muted);
 }
 
@@ -271,18 +292,15 @@ async function signInAsDeveloper() {
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border: 1px solid var(--g-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius);
   background: var(--g-bg);
   color: var(--g-text);
   font-weight: var(--weight-medium);
-  transition:
-    background var(--duration-fast) var(--ease),
-    box-shadow var(--duration-fast) var(--ease);
+  transition: background var(--duration-fast) var(--ease);
 }
 
 .btn-google:hover {
   background: var(--g-hover);
-  box-shadow: var(--shadow);
 }
 
 /* 18px is the mark's own size in Google's spec, like any other icon dimension. */
@@ -298,6 +316,12 @@ async function signInAsDeveloper() {
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-top: var(--space-5);
+}
+
+/* One step under the Google button it sits below: this is the secondary way in, and on a
+   dev build only. */
+.login-dev .dev-button {
+  height: var(--control-height-md);
 }
 
 .login-dev-note {
@@ -316,23 +340,43 @@ async function signInAsDeveloper() {
   justify-content: space-between;
   gap: var(--space-3) var(--space-5);
   padding-top: var(--space-5);
-  border-top: 1px solid var(--border);
-  /* --muted, not --faint: --faint is below the AA floor for copy this small on --surface. */
+  border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: var(--text-xs);
 }
 
+.locales {
+  display: inline-flex;
+  gap: var(--space-4);
+  flex-shrink: 0;
+}
+
+.locale {
+  color: var(--muted);
+  white-space: nowrap;
+  transition: color var(--duration-fast) var(--ease);
+}
+
+.locale:hover {
+  color: var(--accent);
+}
+
+/* The current locale is ink and a weight step, underlined in the accent — the accent's one
+   navigational use, marking which of two states of the same page you are on. */
+.locale.active {
+  color: var(--ink);
+  font-weight: var(--weight-semibold);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--accent);
+}
+
 @media (prefers-color-scheme: dark) {
-  /* Google's dark-theme button variant. */
+  /* Google's dark-theme button variant — again their values, not ours. */
   .btn-google {
     --g-bg: #131314;
     --g-border: #8e918f;
     --g-text: #e3e3e3;
     --g-hover: #1e1f20;
-  }
-
-  .btn-google:hover {
-    box-shadow: none;
   }
 }
 
@@ -349,7 +393,7 @@ async function signInAsDeveloper() {
   }
 
   .login-pitch h2 {
-    font-size: var(--text-xl);
+    font-size: var(--display-xl);
   }
 }
 
@@ -363,10 +407,6 @@ async function signInAsDeveloper() {
 
   .login-brand {
     padding: var(--space-8) var(--space-6);
-  }
-
-  .login-brand::before {
-    background-size: 40px 40px;
   }
 
   .login-brand-inner {
@@ -387,13 +427,13 @@ async function signInAsDeveloper() {
   }
 
   .login-footer {
-    width: min(360px, 100%);
+    width: min(370px, 100%);
   }
 }
 
 @media (max-width: 560px) {
   .login-pitch h2 {
-    font-size: var(--text-lg);
+    font-size: var(--display-md);
   }
 
   .login-brand {

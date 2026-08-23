@@ -18,31 +18,34 @@ defineProps<{
   <div class="copy-field" :class="{ emphasis }">
     <span v-if="label" class="copy-label">{{ label }}</span>
     <code class="copy-value mono">{{ value }}</code>
-    <UiCopyButton :text="value" variant="secondary" />
+    <UiCopyButton :text="value" variant="secondary" size="sm" labelled />
   </div>
 </template>
 
 <style scoped>
+/* Rule-bounded, not boxed: the value sits between two hairlines like every other row of
+   this design, with its copy button on the right. */
 .copy-field {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-4);
   min-width: 0;
-  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
+  padding: var(--space-4) 0;
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
 }
 
 .copy-field.emphasis {
-  background: var(--surface);
-  border-color: var(--border-strong);
+  border-color: var(--edge);
 }
 
 .copy-label {
   flex-shrink: 0;
-  color: var(--muted);
-  font-size: var(--text-xs);
+  color: var(--faint);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
 }
 
 .copy-value {
@@ -51,8 +54,8 @@ defineProps<{
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
-  font-size: var(--text-xs);
+  color: var(--ink);
+  font-size: var(--text-base);
 }
 
 @media (max-width: 640px) {

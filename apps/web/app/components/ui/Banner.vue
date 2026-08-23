@@ -31,18 +31,23 @@ const assertive = computed(() => props.tone === 'error' || props.tone === 'warn'
 </template>
 
 <style scoped>
+/*
+ * A rule and a word, not a tinted slab. This design carries meaning with hairlines, so a
+ * banner is bounded the way every other block on the page is and takes its tone from the
+ * text and the border rather than from a fill.
+ */
 .banner {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   flex-wrap: wrap;
-  padding: var(--space-3);
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text-secondary);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--hair);
+  background: var(--paper);
+  color: var(--muted);
   font-size: var(--text-sm);
+  line-height: 1.6;
 }
 
 .banner-body {
@@ -60,20 +65,19 @@ const assertive = computed(() => props.tone === 'error' || props.tone === 'warn'
 }
 
 .error {
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
+  border-color: var(--danger-edge);
   color: var(--danger);
 }
 
+/* The one-time key reveal. Ink on the rail surface: it has to be the loudest block on the
+   page without borrowing the accent, which belongs to data. */
 .warn {
-  background: var(--warn-bg);
-  border-color: var(--warn-border);
-  color: var(--warn);
+  border-color: var(--edge);
+  background: var(--rail);
+  color: var(--ink);
 }
 
 .ok {
-  background: var(--ok-bg);
-  border-color: var(--ok-border);
-  color: var(--ok);
+  color: var(--ink);
 }
 </style>
