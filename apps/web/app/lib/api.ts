@@ -97,6 +97,8 @@ export interface UploadLimits {
   upload_max_bytes: number
   page_cap: number
   accepted_media_types: string[]
+  /** What intake accepts by extension when the browser reports a generic media type. */
+  accepted_extensions: string[]
 }
 
 export interface MeResponse {

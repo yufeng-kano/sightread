@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { LibraryDocument, LibraryFolder } from './api'
+import type { LibraryDocument, LibraryFolder, UploadLimits } from './api'
 import {
+  acceptsUpload,
   canMoveFolder,
   childFolders,
   documentsIn,
@@ -142,5 +143,33 @@ describe('parse state', () => {
     expect(parseProgress(document(1, 'a.pdf', null, { pages_done: 3, page_count: 12 }))).toBe(0.25)
     expect(parseProgress(document(1, 'a.pdf', null, { pages_done: 0, page_count: null }))).toBe(0)
     expect(parseProgress(document(1, 'a.pdf', null, { pages_done: 20, page_count: 10 }))).toBe(1)
+  })
+})
+
+describe('acceptsUpload', () => {
+  const limits: UploadLimits = {
+    upload_max_bytes: 1000,
+    page_cap: 500,
+    accepted_media_types: ['application/pdf', 'image/jpeg', 'image/heic'],
+    accepted_extensions: ['.pdf', '.jpg', '.heic'],
+  }
+
+  it('takes a file the browser typed for us', () => {
+    expect(acceptsUpload({ name: 'report.pdf', type: 'application/pdf' }, limits)).toBe(true)
+  })
+
+  it('falls back to the extension when the browser had no type to give', () => {
+    // What a drag out of a file manager with no `.heic` association looks like.
+    expect(acceptsUpload({ name: 'scan.heic', type: '' }, limits)).toBe(true)
+    expect(acceptsUpload({ name: 'scan.HEIC', type: 'application/octet-stream' }, limits)).toBe(true)
+  })
+
+  it('refuses what the server would refuse', () => {
+    expect(acceptsUpload({ name: 'notes.txt', type: 'text/plain' }, limits)).toBe(false)
+    expect(acceptsUpload({ name: 'notes', type: '' }, limits)).toBe(false)
+  })
+
+  it('defers to the server while the limits are still loading', () => {
+    expect(acceptsUpload({ name: 'notes.txt', type: 'text/plain' }, null)).toBe(true)
   })
 })

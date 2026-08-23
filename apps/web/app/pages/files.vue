@@ -41,6 +41,7 @@ import {
 } from '~/lib/dnd'
 import { formatBytes, formatShortDateTime } from '~/lib/format'
 import {
+  acceptsUpload,
   canMoveFolder,
   childFolders,
   documentsIn,
@@ -154,7 +155,13 @@ const STATUS_TONE: Record<JobStatus, 'neutral' | 'info' | 'ok' | 'danger'> = {
 const fileInput = ref<HTMLInputElement | null>(null)
 const mutationError = ref<string | null>(null)
 const limits = computed(() => auth.me.value?.limits ?? null)
-const accept = computed(() => limits.value?.accepted_media_types.join(',') ?? '')
+/** Both lists: a file picker filters on either, and a system that types `.heic` as
+ *  nothing at all would otherwise grey the file out. */
+const accept = computed(() =>
+  limits.value
+    ? [...limits.value.accepted_media_types, ...limits.value.accepted_extensions].join(',')
+    : '',
+)
 
 let nextLocalId = 1
 let draining = false
@@ -181,10 +188,9 @@ function rejected(file: File): string | null {
   if (max && file.size > max) {
     return t('files.tooLarge', { name: file.name, limit: formatBytes(max, locale.value) })
   }
-  const accepted = limits.value?.accepted_media_types ?? []
-  // An empty type is what a browser sends for an extension it does not know; the server
-  // falls back to the extension too, so it is not this side's place to refuse it.
-  if (file.type && accepted.length && !accepted.includes(file.type)) {
+  // Judged the way intake judges it — media type, then extension — so this page never
+  // refuses a file the API would have taken (`lib/library.ts`).
+  if (!acceptsUpload(file, limits.value)) {
     return t('files.unsupported', { name: file.name })
   }
   return null
@@ -241,7 +247,14 @@ async function drain() {
         }
         await refresh()
       } catch (error) {
-        if (error instanceof ApiRequestError && error.type === 'rate_limit') {
+        const api = error instanceof ApiRequestError ? error : null
+        // Back-pressure from the job cap and a request that never left the machine are
+        // both "not now". Neither is a reason to make someone find the file again, which
+        // is the whole promise of having a queue (docs/web.md § Files).
+        if (api && (api.type === 'rate_limit' || api.isOffline)) {
+          if (api.isOffline) {
+            mutationError.value = await resolve(error)
+          }
           item.state = 'waiting'
           await new Promise((done) => setTimeout(done, BACKOFF_MS))
           continue
@@ -299,7 +312,10 @@ async function showResult(document: LibraryDocument) {
   // Reading something by hand settles what the screen is for; a queued auto-preview must
   // not take it away when it finishes.
   autoPreviewFor = null
-  if (results.has(document.id) || loadingResults.has(document.id)) {
+  // A parse still running has no result to ask for, and a 404 cached now would be the
+  // answer the dialog kept showing after the pages landed. The watcher below fetches it
+  // the moment the poll says it exists.
+  if (isPending(document) || results.has(document.id) || loadingResults.has(document.id)) {
     return
   }
   loadingResults.add(document.id)
@@ -313,6 +329,27 @@ async function showResult(document: LibraryDocument) {
   }
 }
 
+/**
+ * The open dialog follows its own row. A document opened while it was still parsing has to
+ * pick up the result the moment one exists — otherwise the dialog sits on "nothing to show
+ * yet" until it is closed and opened again, over a row the list already calls succeeded.
+ */
+watch(documents, (list) => {
+  const open = openDocument.value
+  if (!open) {
+    return
+  }
+  const fresh = list.find((row) => row.id === open.id)
+  if (!fresh) {
+    return
+  }
+  openDocument.value = fresh
+  if (!isPending(fresh) && !results.has(fresh.id) && !loadingResults.has(fresh.id)) {
+    resultErrors.delete(fresh.id)
+    void showResult(fresh)
+  }
+})
+
 /** The upload that just finished parsing opens itself — unless the reader is already
  *  reading something, in which case taking the screen away would be rude. */
 watch(documents, (list) => {
@@ -321,6 +358,12 @@ watch(documents, (list) => {
   }
   const target = list.find((row) => row.id === autoPreviewFor)
   if (!target || isPending(target)) {
+    return
+  }
+  if (target.folder_id !== currentFolder.value) {
+    // The reader walked off to another folder while it parsed. "Upload it and read it"
+    // was about the folder they were in, not about interrupting wherever they are now.
+    autoPreviewFor = null
     return
   }
   if (target.status === 'succeeded') {
@@ -1048,7 +1091,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
       :title="openDocument.name"
       :error="openDocument.error"
       :result="results.get(openDocument.id) ?? null"
-      :pending="loadingResults.has(openDocument.id)"
+      :pending="loadingResults.has(openDocument.id) || isPending(openDocument)"
       :error-message="resultErrors.get(openDocument.id) ?? null"
       @close="openDocument = null"
     />

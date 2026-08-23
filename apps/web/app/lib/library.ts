@@ -10,7 +10,7 @@
  * `null` is the root everywhere. It is not a folder row, it is the absence of a parent, and
  * treating it as an id would mean inventing a folder the server does not have.
  */
-import type { LibraryDocument, LibraryFolder } from '~/lib/api'
+import type { LibraryDocument, LibraryFolder, UploadLimits } from '~/lib/api'
 
 export type FolderId = number | null
 
@@ -126,4 +126,30 @@ export function parseProgress(document: LibraryDocument): number {
     return 0
   }
   return Math.min(1, Math.max(0, document.pages_done / document.page_count))
+}
+
+/**
+ * Whether the upload endpoint would take this file, judged by the server's own two lists
+ * (`GET /api/me` § limits).
+ *
+ * The extension is not a fallback for tidiness: a browser reports a generic type — or none
+ * at all — for a file it has no association for, which is routine for `.heic` and for
+ * anything dragged out of a file manager that does not guess. Intake falls back to the
+ * extension in exactly that case, so judging on the media type alone would make this page
+ * stricter than the API it posts to and refuse files the server would have parsed.
+ */
+export function acceptsUpload(
+  file: { name: string; type: string },
+  limits: UploadLimits | null,
+): boolean {
+  if (!limits) {
+    // The limits have not arrived; the server is the authority either way.
+    return true
+  }
+  if (file.type && limits.accepted_media_types.includes(file.type)) {
+    return true
+  }
+  const dot = file.name.lastIndexOf('.')
+  const extension = dot === -1 ? '' : file.name.slice(dot).toLowerCase()
+  return extension !== '' && limits.accepted_extensions.includes(extension)
 }

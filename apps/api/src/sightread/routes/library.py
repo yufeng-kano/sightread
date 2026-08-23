@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 
 from fastapi import APIRouter, Request, Response, status
 from pydantic import BaseModel, Field
@@ -52,11 +53,16 @@ def clean_name(raw: str, limit: int) -> str:
     return name[:limit].strip()
 
 
-def free_name(taken: set[str], name: str) -> str:
+def free_name(taken: set[str], name: str, limit: int) -> str:
     """`report.pdf` → `report (2).pdf` when the folder already holds that name.
 
     A file system resolves a collision rather than refusing the copy, and the suffix goes
     before the extension so the file still opens as what it is (docs/web.md § Files).
+
+    The stem gives up whatever room the suffix needs. A name already at the column's limit
+    would otherwise grow past it, and PostgreSQL answers that with a truncation error — on
+    an upload, after `submit_parse` has committed, so the parse would run and bill the
+    user's key while their request failed.
     """
     if name not in taken:
         return name
@@ -65,7 +71,11 @@ def free_name(taken: set[str], name: str) -> str:
         # No extension at all, or a dotfile — the whole thing is the stem.
         stem, dot, extension = name, "", ""
     for index in range(2, NAME_ATTEMPTS):
-        candidate = f"{stem} ({index}){dot}{extension}"
+        suffix = f" ({index}){dot}{extension}"
+        room = limit - len(suffix)
+        # `room <= 0` needs an extension longer than the whole column, which `clean_name`
+        # already makes impossible; keeping the tail is still the safe answer.
+        candidate = f"{stem[:room]}{suffix}" if room > 0 else suffix[-limit:]
         if candidate not in taken:
             return candidate
     raise ApiError(400, "invalid_request", "Too many items with this name in one folder")
@@ -118,16 +128,25 @@ async def owned_document(db: DbSession, user_id: int, document_id: int) -> Docum
     return row
 
 
-async def subtree_ids(db: DbSession, user_id: int, root_id: int) -> set[int]:
+async def subtree_ids(
+    db: DbSession, user_id: int, root_id: int, for_update: bool = False
+) -> set[int]:
     """`root_id` and every folder under it.
 
     Walked in Python over the account's own (id, parent_id) pairs rather than with a
     recursive CTE: a library is a handful of rows, and this is the same walk on PostgreSQL
     and on the SQLite test fallback.
+
+    `for_update` locks those rows for the rest of the transaction (a PostgreSQL row lock;
+    compiled away on the SQLite fallback). A move needs it: two tabs moving A into B and B
+    into A can each pass the "not inside itself" check against a tree the other has not
+    committed yet, and the pair of updates then commits a cycle — a subtree with no root,
+    so every folder and file in it vanishes from the library.
     """
-    pairs = (
-        await db.execute(select(Folder.id, Folder.parent_id).where(Folder.user_id == user_id))
-    ).all()
+    query = select(Folder.id, Folder.parent_id).where(Folder.user_id == user_id)
+    if for_update:
+        query = query.with_for_update()
+    pairs = (await db.execute(query)).all()
     children: dict[int | None, list[int]] = {}
     for folder_id, parent_id in pairs:
         children.setdefault(parent_id, []).append(folder_id)
@@ -141,6 +160,36 @@ async def subtree_ids(db: DbSession, user_id: int, root_id: int) -> set[int]:
                 found.add(child)
                 frontier.append(child)
     return found
+
+
+async def insert_named[RowT: (Folder, Document)](
+    db: DbSession,
+    *,
+    build: Callable[[str], RowT],
+    taken: Callable[[], Awaitable[set[str]]],
+    wanted: str,
+    limit: int,
+    message: str,
+) -> RowT:
+    """Insert a row whose name has to be free where it lands, re-reading if it was taken.
+
+    Two tabs can both read the same free name before either commits. The loser is not a
+    conflict to report: a collision on create is resolved rather than refused
+    (docs/web.md § Files), so it re-reads the folder and takes the next name. Only a
+    request that keeps losing gives up.
+    """
+    attempts = INSERT_ATTEMPTS
+    while True:
+        attempts -= 1
+        row = build(free_name(await taken(), wanted, limit))
+        db.add(row)
+        try:
+            await db.commit()
+            return row
+        except IntegrityError as exc:
+            await db.rollback()
+            if attempts <= 0:
+                raise ApiError(409, "invalid_request", message) from exc
 
 
 async def commit_or_conflict(db: DbSession, message: str) -> None:
@@ -239,11 +288,15 @@ class FolderUpdate(BaseModel):
 async def create_folder(body: FolderCreate, user: SessionUser, db: DbSession):
     if body.parent_id is not None:
         await owned_folder(db, user.id, body.parent_id)
-    wanted = clean_name(body.name, FOLDER_NAME_MAX)
-    name = free_name(await folder_names(db, user.id, body.parent_id), wanted)
-    row = Folder(user_id=user.id, parent_id=body.parent_id, name=name)
-    db.add(row)
-    await commit_or_conflict(db, "A folder with this name already exists here")
+    parent_id = body.parent_id
+    row = await insert_named(
+        db,
+        build=lambda name: Folder(user_id=user.id, parent_id=parent_id, name=name),
+        taken=lambda: folder_names(db, user.id, parent_id),
+        wanted=clean_name(body.name, FOLDER_NAME_MAX),
+        limit=FOLDER_NAME_MAX,
+        message="A folder with this name already exists here",
+    )
     return folder_payload(row)
 
 
@@ -261,7 +314,7 @@ async def update_folder(folder_id: int, body: FolderUpdate, user: SessionUser, d
 
     if parent_id != row.parent_id and parent_id is not None:
         await owned_folder(db, user.id, parent_id)
-        if parent_id in await subtree_ids(db, user.id, row.id):
+        if parent_id in await subtree_ids(db, user.id, row.id, for_update=True):
             raise ApiError(400, "invalid_request", "A folder cannot be moved inside itself")
 
     renaming = "name" in provided and body.name is not None
@@ -271,7 +324,7 @@ async def update_folder(folder_id: int, body: FolderUpdate, user: SessionUser, d
         raise ApiError(409, "invalid_request", "A folder with this name already exists here")
 
     row.parent_id = parent_id
-    row.name = free_name(taken, wanted)
+    row.name = free_name(taken, wanted, FOLDER_NAME_MAX)
     await commit_or_conflict(db, "A folder with this name already exists here")
     return folder_payload(row)
 
@@ -356,27 +409,16 @@ async def upload_document(
     # that already produced it (docs/jobs.md § Dedup).
     job_id = submission.job.id if submission.job is not None else submission.cached.job_id
 
-    wanted = clean_name(filename, DOCUMENT_NAME_MAX)
-    for attempt in range(INSERT_ATTEMPTS):
-        row = Document(
-            user_id=user.id,
-            folder_id=folder_id,
-            job_id=job_id,
-            name=free_name(await document_names(db, user.id, folder_id), wanted),
-        )
-        db.add(row)
-        try:
-            await db.commit()
-            break
-        except IntegrityError as exc:
-            # Another tab claimed the name between the read above and this commit. The job
-            # is already committed and running, so the file has to land: re-read and retry.
-            await db.rollback()
-            if attempt == INSERT_ATTEMPTS - 1:
-                raise ApiError(
-                    409, "invalid_request", "A file with this name already exists here"
-                ) from exc
-
+    # The job is committed and running by now, so the file has to land: `insert_named`
+    # re-reads and retries rather than answering a conflict.
+    row = await insert_named(
+        db,
+        build=lambda name: Document(user_id=user.id, folder_id=folder_id, job_id=job_id, name=name),
+        taken=lambda: document_names(db, user.id, folder_id),
+        wanted=clean_name(filename, DOCUMENT_NAME_MAX),
+        limit=DOCUMENT_NAME_MAX,
+        message="A file with this name already exists here",
+    )
     return document_payload(row, await job_of(db, job_id))
 
 
@@ -396,7 +438,7 @@ async def update_document(document_id: int, body: DocumentUpdate, user: SessionU
         raise ApiError(409, "invalid_request", "A file with this name already exists here")
 
     row.folder_id = folder_id
-    row.name = free_name(taken, wanted)
+    row.name = free_name(taken, wanted, DOCUMENT_NAME_MAX)
     await commit_or_conflict(db, "A file with this name already exists here")
     return document_payload(row, await job_of(db, row.job_id))
 

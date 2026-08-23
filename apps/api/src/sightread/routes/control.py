@@ -182,6 +182,9 @@ async def me(user: SessionUser, db: DbSession, settings: AppSettings):
             "upload_max_bytes": settings.upload_max_bytes,
             "page_cap": settings.page_cap,
             "accepted_media_types": [PDF_MEDIA_TYPE, *ACCEPTED_IMAGE_TYPES],
+            # The extensions intake falls back to when a browser reports a generic type
+            # for a file it has no association for (docs/api.md § Limits).
+            "accepted_extensions": [".pdf", *sorted(set(ACCEPTED_IMAGE_TYPES.values()))],
         },
     }
 

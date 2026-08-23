@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from sightread.auth.sessions import SESSION_COOKIE, create_session
 from sightread.db.models import Document, Job, Result, User
+from sightread.routes.library import DOCUMENT_NAME_MAX, free_name
 from tests.conftest import CSRF_HEADERS
 
 MODEL = "vendor/vision-model"
@@ -179,6 +180,29 @@ async def test_an_upload_becomes_a_queued_job_and_a_file(library, sessionmaker, 
         job = await db.get(Job, document.job_id)
     assert job.status == "queued"
     assert job.filename == "tiny.png"
+
+
+def test_a_collision_suffix_never_pushes_a_name_past_its_column() -> None:
+    # A name already at the limit has to give up room for the suffix: PostgreSQL answers a
+    # name one character too long with a truncation error, and for an upload that lands
+    # after the job is committed and already parsing.
+    at_limit = f"{'x' * (DOCUMENT_NAME_MAX - 4)}.pdf"
+    suffixed = free_name({at_limit}, at_limit, DOCUMENT_NAME_MAX)
+
+    assert suffixed != at_limit
+    assert len(suffixed) <= DOCUMENT_NAME_MAX
+    assert suffixed.endswith(" (2).pdf")
+
+
+async def test_an_upload_at_the_name_limit_still_lands(library, documents) -> None:
+    long_name = f"{'x' * (DOCUMENT_NAME_MAX - 4)}.png"
+    first = await _upload(library, documents, name=long_name)
+    second = await _upload(library, documents, name=long_name)
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert len(second.json()["name"]) <= DOCUMENT_NAME_MAX
+    assert second.json()["name"] != first.json()["name"]
 
 
 async def test_the_same_filename_twice_is_suffixed_before_the_extension(library, documents) -> None:
