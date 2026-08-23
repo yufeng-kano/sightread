@@ -5,7 +5,9 @@ PostgreSQL 16+. Schema changes **only** via Alembic migrations under `apps/api/m
 ## Tables
 
 ```text
-users            id PK, google_sub UNIQUE, email, name, created_at
+users            id PK, google_sub UNIQUE, email, name,
+                 picture NULL,                    -- Google avatar URL, refreshed each sign-in
+                 created_at
 sessions         id PK, user_id FK, token_hash UNIQUE, created_at, expires_at
 api_keys         id PK, user_id FK, name, key_hash UNIQUE, prefix, created_at,
                  last_used_at, revoked_at NULL
@@ -13,15 +15,22 @@ openrouter_keys  user_id PK/FK, ciphertext BYTEA, masked, updated_at        -- o
 provider_connections
                  id PK, user_id FK, name, base_url,
                  ciphertext BYTEA, masked,        -- the connection's API key, AES-GCM
+                 model NULL,                      -- the connection's fixed parsing model,
+                                                  -- picked in the connection dialog; NULL
+                                                  -- only on rows created before the column
                  created_at, updated_at
                  UNIQUE (user_id, name)
                  -- user-defined OpenAI-compatible endpoints (e.g. a kano-proxy
-                 -- /openai/v1 base); the built-in OpenRouter upstream is NOT a row here
+                 -- /openai/v1 base); a connection is a complete profile — endpoint,
+                 -- key and model travel together; the built-in OpenRouter upstream
+                 -- is NOT a row here
 prompt_presets   id PK, user_id FK, name, text TEXT, created_at, updated_at
                  UNIQUE (user_id, name)
                  -- named transcription prompts; selecting one replaces the template
                  -- entirely (docs/parsing.md § Prompts)
 user_settings    user_id PK/FK, default_model, default_profile,
+                                                  -- OpenRouter-only defaults: a selected
+                                                  -- connection carries its own model
                  default_connection_id FK NULL,   -- provider_connections; NULL = OpenRouter
                  prompt_preset_id FK NULL         -- prompt_presets; NULL = default prompt
                  -- both FKs ON DELETE SET NULL: deleting a connection/preset falls back
@@ -66,7 +75,7 @@ oauth_grants     id PK, client_id FK, user_id FK, kind code|access|refresh,
 
 - All credentials at rest follow [auth.md](./auth.md): hashes for anything we only verify, AES-GCM ciphertext for what we must replay upstream (the OpenRouter key and every provider connection's key). No plaintext secrets in any column.
 - `user_settings.system_prompt` no longer exists: the migration turned each stored custom prompt into a `prompt_presets` row named "Custom prompt" and pointed `prompt_preset_id` at it, so behavior did not change for anyone.
-- **Editing** a connection (URL or key) applies to jobs still queued on it — the worker resolves the row at run time, the same semantics as rotating the OpenRouter key while jobs are queued. Deliberate: snapshotting encrypted credentials onto job rows would copy secrets around, and a user edits their own connection precisely so pending work uses the fix. The dedup cache is protected separately by the `connection_base_url` snapshot ([jobs.md](./jobs.md) § Dedup).
+- **Editing** a connection's model only affects new jobs: `jobs.model` is snapshotted at enqueue like every other parse parameter. Editing its URL or key applies to jobs still queued on it — the worker resolves the row at run time, the same semantics as rotating the OpenRouter key while jobs are queued. Deliberate: snapshotting encrypted credentials onto job rows would copy secrets around, and a user edits their own connection precisely so pending work uses the fix. The dedup cache is protected separately by the `connection_base_url` snapshot ([jobs.md](./jobs.md) § Dedup).
 - `jobs.connection_id` carries **no foreign key** on purpose: the upstream a job ran on is immutable history. A FK with SET NULL would relabel a deleted connection's jobs as OpenRouter jobs — a still-queued one would then run against OpenRouter billing the wrong key, and a succeeded one would answer OpenRouter dedup lookups with another upstream's output; RESTRICT would make a connection undeletable once any job exists. Instead the id simply outlives the row: the worker fails a queued job whose connection is gone ("the provider connection for this job no longer exists"), and dedup keys keep matching only their own upstream (connection ids are never reused).
 - `results` holds parsed **output** (kept indefinitely); `jobs.source_path` points at a temp file that is deleted at terminal state — the DB never stores document bytes.
 - Job claiming and per-user caps: exact queries in [jobs.md](./jobs.md).

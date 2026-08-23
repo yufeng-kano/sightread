@@ -44,6 +44,8 @@ export interface User {
   id: number
   email: string
   name: string | null
+  /** Google avatar URL, refreshed on each sign-in; null for dev sign-in. */
+  picture: string | null
   created_at: string
 }
 
@@ -56,12 +58,17 @@ export interface UserSettings {
   prompt_preset_id: number | null
 }
 
-/** A user-defined OpenAI-compatible endpoint; the API key only ever returns masked. */
+/**
+ * A user-defined OpenAI-compatible endpoint; the API key only ever returns masked.
+ * A connection is a complete profile — endpoint, key and model travel together; `model`
+ * is null only on rows created before the column existed (docs/api.md § Upstreams).
+ */
 export interface ProviderConnection {
   id: number
   name: string
   base_url: string
   masked: string
+  model: string | null
   created_at: string
   updated_at: string
 }
@@ -328,13 +335,14 @@ export function createConnection(body: {
   name: string
   base_url: string
   api_key: string
+  model: string
 }): Promise<ProviderConnection> {
   return request('POST', '/api/connections', body)
 }
 
 export function updateConnection(
   id: number,
-  body: Partial<{ name: string; base_url: string; api_key: string }>,
+  body: Partial<{ name: string; base_url: string; api_key: string; model: string }>,
 ): Promise<ProviderConnection> {
   return request('PUT', `/api/connections/${id}`, body)
 }
@@ -343,9 +351,16 @@ export function deleteConnection(id: number): Promise<void> {
   return request<undefined>('DELETE', `/api/connections/${id}`)
 }
 
-/** The connection's live model catalog, fetched server-side with its stored key. */
-export function listConnectionModels(id: number): Promise<{ data: ConnectionModel[] }> {
-  return request('GET', `/api/connections/${id}/models`)
+/**
+ * The live model catalog the connection dialog picks from — with a candidate key before
+ * the connection exists, or with the stored key (`connection_id`) while editing one.
+ */
+export function previewConnectionModels(body: {
+  base_url: string
+  api_key?: string
+  connection_id?: number
+}): Promise<{ data: ConnectionModel[] }> {
+  return request('POST', '/api/connections/preview-models', body)
 }
 
 // --- prompt presets ---------------------------------------------------------

@@ -40,13 +40,20 @@ def build_oauth(settings: Settings) -> OAuth:
     return oauth
 
 
-async def upsert_user(db: AsyncSession, google_sub: str, email: str, name: str | None) -> User:
-    """Users are keyed by the Google `sub`; email and name are refreshed on each sign-in."""
+async def upsert_user(
+    db: AsyncSession,
+    google_sub: str,
+    email: str,
+    name: str | None,
+    picture: str | None = None,
+) -> User:
+    """Users are keyed by the Google `sub`; email, name and picture are refreshed on each
+    sign-in."""
     user = (
         await db.execute(select(User).where(User.google_sub == google_sub))
     ).scalar_one_or_none()
     if user is None:
-        user = User(google_sub=google_sub, email=email, name=name)
+        user = User(google_sub=google_sub, email=email, name=name, picture=picture)
         db.add(user)
         await db.flush()
         db.add(UserSettings(user_id=user.id))
@@ -54,5 +61,6 @@ async def upsert_user(db: AsyncSession, google_sub: str, email: str, name: str |
         return user
     user.email = email
     user.name = name
+    user.picture = picture
     await db.flush()
     return user

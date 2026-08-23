@@ -36,10 +36,12 @@ def _models_ok(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=MODELS_PAYLOAD)
 
 
-async def _create_connection(client: AsyncClient, name: str = "kano") -> dict:
+async def _create_connection(
+    client: AsyncClient, name: str = "kano", model: str = "grok/grok-4.5"
+) -> dict:
     response = await client.post(
         "/api/connections",
-        json={"name": name, "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        json={"name": name, "base_url": BASE, "api_key": "sk-kano-proxy-secret", "model": model},
         headers=CSRF_HEADERS,
     )
     assert response.status_code == 201, response.text
@@ -59,6 +61,8 @@ async def test_create_connection_validates_and_never_returns_the_key(signed_in) 
     assert route.calls[0].request.headers["authorization"] == "Bearer sk-kano-proxy-secret"
     assert created["name"] == "kano"
     assert created["base_url"] == BASE
+    # The model is part of the profile, fixed at creation (docs/api.md § Upstreams).
+    assert created["model"] == "grok/grok-4.5"
     assert "sk-kano-proxy-secret" not in json.dumps(created)
     assert created["masked"].endswith("cret")
 
@@ -73,7 +77,12 @@ async def test_a_rejected_key_stores_nothing(signed_in) -> None:
 
     response = await signed_in.post(
         "/api/connections",
-        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-wrong"},
+        json={
+            "name": "kano",
+            "base_url": BASE,
+            "api_key": "sk-kano-proxy-wrong",
+            "model": "grok/grok-4.5",
+        },
         headers=CSRF_HEADERS,
     )
 
@@ -88,7 +97,12 @@ async def test_an_unreachable_endpoint_is_upstream_not_a_bad_key(signed_in) -> N
 
     response = await signed_in.post(
         "/api/connections",
-        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        json={
+            "name": "kano",
+            "base_url": BASE,
+            "api_key": "sk-kano-proxy-secret",
+            "model": "grok/grok-4.5",
+        },
         headers=CSRF_HEADERS,
     )
 
@@ -103,7 +117,12 @@ async def test_a_non_object_model_list_is_an_upstream_error(signed_in) -> None:
 
     response = await signed_in.post(
         "/api/connections",
-        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        json={
+            "name": "kano",
+            "base_url": BASE,
+            "api_key": "sk-kano-proxy-secret",
+            "model": "grok/grok-4.5",
+        },
         headers=CSRF_HEADERS,
     )
 
@@ -126,7 +145,12 @@ async def test_a_lost_duplicate_name_race_is_a_400_not_a_500(signed_in, monkeypa
     monkeypatch.setattr(control, "_refuse_duplicate_connection_name", race_passed_precheck)
     duplicate = await signed_in.post(
         "/api/connections",
-        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        json={
+            "name": "kano",
+            "base_url": BASE,
+            "api_key": "sk-kano-proxy-secret",
+            "model": "grok/grok-4.5",
+        },
         headers=CSRF_HEADERS,
     )
     assert duplicate.status_code == 400
@@ -140,24 +164,64 @@ async def test_duplicate_connection_names_are_refused(signed_in) -> None:
 
     duplicate = await signed_in.post(
         "/api/connections",
-        json={"name": "kano", "base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        json={
+            "name": "kano",
+            "base_url": BASE,
+            "api_key": "sk-kano-proxy-secret",
+            "model": "grok/grok-4.5",
+        },
         headers=CSRF_HEADERS,
     )
     assert duplicate.status_code == 400
 
 
 @respx.mock
-async def test_connection_models_uses_the_stored_key(signed_in) -> None:
-    respx.get(MODELS_URL).mock(side_effect=_models_ok)
-    created = await _create_connection(signed_in)
+async def test_preview_models_with_a_candidate_key(signed_in) -> None:
+    """The create dialog's catalog: no connection exists yet, the typed key is used."""
+    route = respx.get(MODELS_URL).mock(side_effect=_models_ok)
 
-    models = await signed_in.get(f"/api/connections/{created['id']}/models")
+    models = await signed_in.post(
+        "/api/connections/preview-models",
+        json={"base_url": BASE, "api_key": "sk-kano-proxy-secret"},
+        headers=CSRF_HEADERS,
+    )
 
     assert models.status_code == 200
+    assert route.calls[0].request.headers["authorization"] == "Bearer sk-kano-proxy-secret"
     assert models.json()["data"] == [
         {"id": "claude-code/claude-opus-5", "name": None},
         {"id": "grok/grok-4.5", "name": "Grok 4.5"},
     ]
+
+
+@respx.mock
+async def test_preview_models_uses_the_stored_key_when_none_is_typed(signed_in) -> None:
+    """The edit dialog's catalog: `connection_id` reuses the stored key, never re-typed."""
+    route = respx.get(MODELS_URL).mock(side_effect=_models_ok)
+    created = await _create_connection(signed_in)
+
+    models = await signed_in.post(
+        "/api/connections/preview-models",
+        json={"base_url": BASE, "connection_id": created["id"]},
+        headers=CSRF_HEADERS,
+    )
+
+    assert models.status_code == 200
+    assert route.calls[-1].request.headers["authorization"] == "Bearer sk-kano-proxy-secret"
+    assert [entry["id"] for entry in models.json()["data"]] == [
+        "claude-code/claude-opus-5",
+        "grok/grok-4.5",
+    ]
+
+
+async def test_preview_models_needs_a_key_or_a_connection(signed_in) -> None:
+    response = await signed_in.post(
+        "/api/connections/preview-models",
+        json={"base_url": BASE},
+        headers=CSRF_HEADERS,
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request"
 
 
 @respx.mock
@@ -178,12 +242,28 @@ async def test_update_revalidates_a_moved_endpoint_with_the_stored_key(signed_in
 
 
 @respx.mock
+async def test_update_can_repick_the_model(signed_in) -> None:
+    """The edit dialog re-picks the profile's model; nothing else has to be sent."""
+    respx.get(MODELS_URL).mock(side_effect=_models_ok)
+    created = await _create_connection(signed_in)
+
+    response = await signed_in.put(
+        f"/api/connections/{created['id']}",
+        json={"model": "claude-code/claude-opus-5"},
+        headers=CSRF_HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "claude-code/claude-opus-5"
+
+
+@respx.mock
 async def test_deleting_the_default_connection_falls_back_to_openrouter(signed_in) -> None:
     respx.get(MODELS_URL).mock(side_effect=_models_ok)
     created = await _create_connection(signed_in)
     await signed_in.put(
         "/api/settings",
-        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        json={"default_connection_id": created["id"]},
         headers=CSRF_HEADERS,
     )
 
@@ -380,7 +460,7 @@ async def test_parse_runs_on_the_default_connection(make_client, sessionmaker, d
     created = await _create_connection(client)
     await client.put(
         "/api/settings",
-        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        json={"default_connection_id": created["id"]},
         headers=CSRF_HEADERS,
     )
     key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
@@ -418,6 +498,40 @@ async def test_parse_runs_on_the_default_connection(make_client, sessionmaker, d
 
 
 @respx.mock
+async def test_an_explicit_request_model_overrides_the_connections_model(
+    make_client, sessionmaker, documents
+) -> None:
+    """The connection's stored model is the default, not a cage: a per-request `model`
+    still wins (docs/api.md § Upstreams)."""
+    respx.get(MODELS_URL).mock(side_effect=_models_ok)
+
+    client = make_client()
+    assert (await client.post("/api/auth/dev-login", headers=CSRF_HEADERS)).status_code == 200
+    created = await _create_connection(client)
+    await client.put(
+        "/api/settings",
+        json={"default_connection_id": created["id"]},
+        headers=CSRF_HEADERS,
+    )
+    key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
+    client.headers["Authorization"] = f"Bearer {key.json()['key']}"
+
+    accepted = await client.post(
+        "/v1/parse",
+        files={"file": ("tiny.png", documents["png"].read_bytes(), "image/png")},
+        data={"model": "claude-code/claude-opus-5"},
+    )
+    assert accepted.status_code == 202, accepted.text
+
+    async with sessionmaker() as db:
+        job = (
+            await db.execute(select(Job).where(Job.id == uuid.UUID(accepted.json()["job_id"])))
+        ).scalar_one()
+        assert job.model == "claude-code/claude-opus-5"
+        assert job.connection_id == created["id"]
+
+
+@respx.mock
 async def test_deleting_a_connection_never_relabels_its_jobs_as_openrouter(
     make_client, sessionmaker, documents
 ) -> None:
@@ -431,7 +545,7 @@ async def test_deleting_a_connection_never_relabels_its_jobs_as_openrouter(
     created = await _create_connection(client)
     await client.put(
         "/api/settings",
-        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        json={"default_connection_id": created["id"]},
         headers=CSRF_HEADERS,
     )
     key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
@@ -488,7 +602,7 @@ async def test_a_queued_job_reconciles_its_endpoint_snapshot_at_claim_time(
     created = await _create_connection(client)
     await client.put(
         "/api/settings",
-        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        json={"default_connection_id": created["id"]},
         headers=CSRF_HEADERS,
     )
     key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
@@ -531,7 +645,7 @@ async def test_a_profile_request_is_refused_on_a_custom_connection(
     created = await _create_connection(client)
     await client.put(
         "/api/settings",
-        json={"default_connection_id": created["id"], "default_model": "grok/grok-4.5"},
+        json={"default_connection_id": created["id"]},
         headers=CSRF_HEADERS,
     )
     key = await client.post("/api/keys", json={"name": "test"}, headers=CSRF_HEADERS)
