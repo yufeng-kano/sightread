@@ -14,8 +14,13 @@
  *  - **Polling, not streaming.** While anything is queued or running, the same one read
  *    repeats every couple of seconds and refreshes every row's status and progress at once.
  *
+ * The screen has no action buttons at all. Uploading, making a folder, renaming, moving and
+ * deleting are opened where a desktop file manager opens them — a right-click, a long press,
+ * or `Shift+F10` on whatever is focused — so there is one interaction to learn instead of a
+ * button per verb. Left-click still means open (docs/web.md § Files).
+ *
  * Nothing on this screen explains itself in prose: the drop target, the empty folder and
- * the row controls say what they are.
+ * the menu items say what they are.
  */
 import {
   ApiRequestError,
@@ -40,6 +45,7 @@ import {
   setDropEffect,
 } from '~/lib/dnd'
 import { formatBytes, formatShortDateTime } from '~/lib/format'
+import type { MenuItem, Point } from '~/lib/menu'
 import {
   acceptsUpload,
   canMoveFolder,
@@ -76,23 +82,10 @@ const documents = computed<LibraryDocument[]>(() => data.value?.documents ?? [])
 // --- where we are ----------------------------------------------------------
 
 const currentFolder = ref<FolderId>(null)
-const expanded = ref(new Set<number>())
 const crumbs = computed(() => folderPath(folders.value, currentFolder.value))
 
 function openFolder(id: FolderId) {
   currentFolder.value = id
-  // Opening a folder opens the path to it: the rail must be able to show where you are.
-  for (const folder of folderPath(folders.value, id)) {
-    expanded.value.add(folder.id)
-  }
-}
-
-function toggleFolder(id: number) {
-  if (expanded.value.has(id)) {
-    expanded.value.delete(id)
-  } else {
-    expanded.value.add(id)
-  }
 }
 
 /** A folder deleted in another tab would otherwise leave this screen looking at nothing. */
@@ -145,7 +138,6 @@ const columns = computed<TableColumn<Row>[]>(() => [
   { key: 'pages', header: t('files.columnPages'), numeric: true, width: '84px' },
   { key: 'size', header: t('files.columnSize'), numeric: true, width: '96px' },
   { key: 'added', header: t('files.columnAdded'), numeric: true, width: '148px' },
-  { key: 'actions', header: '', srHeader: t('files.columnActions'), align: 'end', width: '108px' },
 ])
 
 const STATUS_TONE: Record<JobStatus, 'neutral' | 'info' | 'ok' | 'danger'> = {
@@ -173,13 +165,18 @@ let draining = false
 /** Set on unmount: a queue retrying against the job cap must not outlive the screen. */
 let left = false
 
-function pickFiles() {
+/** Where the picker's files will land. The menu can be opened on a folder that is not the
+ *  open one, and the OS dialog answers long after the menu has gone. */
+let pickInto: FolderId = null
+
+function pickFiles(into: FolderId) {
+  pickInto = into
   fileInput.value?.click()
 }
 
 function onPicked(event: Event) {
   const input = event.target as HTMLInputElement
-  addToQueue([...(input.files ?? [])], currentFolder.value)
+  addToQueue([...(input.files ?? [])], pickInto)
   // Cleared so picking the same file twice in a row still fires `change`.
   input.value = ''
 }
@@ -383,6 +380,8 @@ watch(documents, (list) => {
 /** What a dialog is currently about. One ref per dialog, never a shared "mode". */
 const newFolderName = ref('')
 const showNewFolder = ref(false)
+/** The folder the new one goes into — the menu's folder, not necessarily the open one. */
+const newFolderParent = ref<FolderId>(null)
 const renaming = ref<Row | null>(null)
 const renameValue = ref('')
 const moving = ref<Row | null>(null)
@@ -399,7 +398,8 @@ function rowName(row: Row): string {
   return row.upload.name
 }
 
-function openNewFolder() {
+function openNewFolder(parent: FolderId) {
+  newFolderParent.value = parent
   newFolderName.value = t('files.newFolderName')
   mutationError.value = null
   showNewFolder.value = true
@@ -429,15 +429,9 @@ async function submitNewFolder() {
   if (!name) {
     return
   }
-  let created: LibraryFolder | null = null
-  const ok = await commit(async () => {
-    created = await createFolder({ name, parent_id: currentFolder.value })
-  })
+  const ok = await commit(() => createFolder({ name, parent_id: newFolderParent.value }))
   if (ok) {
     showNewFolder.value = false
-    if (created) {
-      expanded.value.add((created as LibraryFolder).id)
-    }
   }
 }
 
@@ -521,6 +515,127 @@ async function confirmDelete() {
   }
 }
 
+// --- the menu --------------------------------------------------------------
+
+/**
+ * The screen's only action surface (docs/web.md § Files).
+ *
+ * Two things can be right-clicked, and they mean different targets: a row acts on itself,
+ * while the list's empty space acts on the folder that is open — which is why `MenuOn` has
+ * two shapes rather than one.
+ */
+type MenuOn = { kind: 'row'; row: Row } | { kind: 'folder'; id: FolderId }
+
+/** `fromKey` is how it was opened: only then does the menu open with a row highlighted. */
+const menu = ref<{ on: MenuOn; at: Point; fromKey?: boolean } | null>(null)
+const press = useLongPress()
+
+function openMenu(on: MenuOn, at: Point, fromKey = false) {
+  // A menu opened by the platform's own long press must not be followed by ours.
+  press.cancel()
+  menu.value = { on, at, fromKey }
+}
+
+function openMenuFromPointer(event: MouseEvent, on: MenuOn) {
+  event.preventDefault()
+  // The list under the row is a target too; the innermost thing under the pointer wins.
+  event.stopPropagation()
+  openMenu(on, { x: event.clientX, y: event.clientY })
+}
+
+/**
+ * The keyboard's route in — the Menu key, or `Shift+F10` where there is no Menu key. It has
+ * no pointer, so the menu opens under the control that asked for it, as Windows and GNOME
+ * both do.
+ */
+function openMenuFromKey(event: KeyboardEvent, on: MenuOn) {
+  if (event.key !== 'ContextMenu' && !(event.key === 'F10' && event.shiftKey)) {
+    return
+  }
+  event.preventDefault()
+  const box = (event.target as HTMLElement).getBoundingClientRect()
+  openMenu(on, { x: box.left, y: box.bottom }, true)
+}
+
+function folderName(id: FolderId): string {
+  return folders.value.find((folder) => folder.id === id)?.name ?? t('files.root')
+}
+
+const menuItems = computed<MenuItem[]>(() => {
+  const on = menu.value?.on
+  if (!on) {
+    return []
+  }
+  if (on.kind === 'row') {
+    return [
+      {
+        key: 'open',
+        label: t('files.open'),
+        icon: on.row.kind === 'folder' ? 'folder-open' : 'file-text',
+      },
+      { key: 'rename', label: t('files.rename'), icon: 'edit', separated: true },
+      { key: 'move', label: t('files.move'), icon: 'folder-input' },
+      { key: 'delete', label: t('common.delete'), icon: 'trash', danger: true, separated: true },
+    ]
+  }
+  return [
+    { key: 'upload', label: t('files.upload'), icon: 'upload' },
+    { key: 'newFolder', label: t('files.newFolder'), icon: 'plus' },
+  ]
+})
+
+/** The menu's accessible name is what it acts on — the only place that is ever said. */
+const menuLabel = computed(() => {
+  const on = menu.value?.on
+  if (!on) {
+    return ''
+  }
+  return t('files.menuFor', {
+    name: on.kind === 'row' ? rowName(on.row) : folderName(on.id),
+  })
+})
+
+/** A left-click on the row's name, as an action — so the menu's Open is the same thing. */
+function openRow(row: Row) {
+  if (row.kind === 'folder') {
+    openFolder(row.folder.id)
+  } else if (row.kind === 'file') {
+    void showResult(row.document)
+  }
+}
+
+function runMenu(action: string) {
+  const on = menu.value?.on
+  if (!on) {
+    return
+  }
+  mutationError.value = null
+  if (on.kind === 'row') {
+    switch (action) {
+      case 'open':
+        return openRow(on.row)
+      case 'rename':
+        return openRename(on.row)
+      case 'move':
+        moving.value = on.row
+        return
+      case 'delete':
+        deleting.value = on.row
+        return
+    }
+    return
+  }
+  switch (action) {
+    case 'upload':
+      return pickFiles(on.id)
+    case 'newFolder':
+      return openNewFolder(on.id)
+  }
+}
+
+/** The list's own menu: the empty space below the rows, and the panel around them. */
+const listMenu = computed<MenuOn>(() => ({ kind: 'folder', id: currentFolder.value }))
+
 // --- dragging --------------------------------------------------------------
 
 /**
@@ -549,11 +664,10 @@ let dragWatchdog: ReturnType<typeof setTimeout> | undefined
 /**
  * How long an unlit frame has to last before the target really goes out.
  *
- * A pointer crossing the 1px rule between two tree rows lands one `dragover` on the list
- * that holds them, and the browser dispatches the odd frame on a parent during a fast move.
- * Both are single events between two that claim the same row, and unlighting on them makes
- * the target blink all the way down a tree. So the clear is scheduled, and the next claim
- * cancels it.
+ * A pointer crossing the rule between two rows lands one `dragover` on the table that holds
+ * them, and the browser dispatches the odd frame on a parent during a fast move. Both are
+ * single events between two that claim the same row, and unlighting on them makes the target
+ * blink all the way down the list. So the clear is scheduled, and the next claim cancels it.
  */
 const TARGET_CLEAR_MS = 80
 let clearTargetTimer: ReturnType<typeof setTimeout> | undefined
@@ -573,11 +687,6 @@ function canMoveInto(item: Row | null, target: FolderId): boolean {
   return item.kind === 'file' && item.document.folder_id !== target
 }
 
-/** What the tree asks while a drag is in the air: is this row a live target right now? */
-function canDropOn(target: FolderId): boolean {
-  return fileDrag.value || canMoveInto(dragItem.value, target)
-}
-
 function startDrag(event: DragEvent, row: Row) {
   dragItem.value = row
   if (event.dataTransfer) {
@@ -586,11 +695,6 @@ function startDrag(event: DragEvent, row: Row) {
     event.dataTransfer.setData('text/plain', rowName(row))
     event.dataTransfer.effectAllowed = 'move'
   }
-}
-
-/** A folder dragged out of the rail is the same move as one dragged out of the list. */
-function startFolderDrag(folder: LibraryFolder, event: DragEvent) {
-  startDrag(event, { kind: 'folder', key: `folder-${folder.id}`, folder })
 }
 
 function holdTarget() {
@@ -745,12 +849,18 @@ function onListDrop(event: DragEvent) {
 
 function rowAttrs(row: Row): Record<string, unknown> {
   if (row.kind === 'upload') {
+    // A file still going up has nothing to act on. The gesture falls through to the list,
+    // whose menu is the right one for it anyway.
     return {}
   }
+  const on: MenuOn = { kind: 'row', row }
   const base: Record<string, unknown> = {
     draggable: 'true',
     onDragstart: (event: DragEvent) => startDrag(event, row),
     onDragend: endDrag,
+    onContextmenu: (event: MouseEvent) => openMenuFromPointer(event, on),
+    onKeydown: (event: KeyboardEvent) => openMenuFromKey(event, on),
+    ...press.on((at) => openMenu(on, at)),
   }
   if (row.kind !== 'folder') {
     return base
@@ -765,53 +875,32 @@ function rowAttrs(row: Row): Record<string, unknown> {
 </script>
 
 <template>
-  <UiScreen>
-    <UiRail>
-      <UiPageHeader
-        :eyebrow="
-          data ? t('files.counts', { folders: folders.length, files: documents.length }) : ''
-        "
-        :title="t('files.headTitle')"
-      />
-
-      <div class="actions">
-        <UiButton variant="primary" block @click="pickFiles">
-          <template #icon><UiIcon name="upload" /></template>
-          {{ t('files.upload') }}
-        </UiButton>
-        <UiButton variant="secondary" block @click="openNewFolder">
-          <template #icon><UiIcon name="plus" /></template>
-          {{ t('files.newFolder') }}
-        </UiButton>
-        <input
-          ref="fileInput"
-          class="sr-only"
-          type="file"
-          multiple
-          :accept="accept"
-          @change="onPicked"
-        >
-      </div>
-
-      <FolderTree
-        :folders="folders"
-        :selected="currentFolder"
-        :expanded="expanded"
-        live
-        :can-drop="canDropOn"
-        :drop-target="dropTarget"
-        @select="openFolder"
-        @toggle="toggleFolder"
-        @hover="dropTarget = $event"
-        @drag-folder="startFolderDrag"
-        @drop-on="dropOn"
-      />
-    </UiRail>
-
+  <UiScreen full>
     <UiRegion>
+      <input
+        ref="fileInput"
+        class="sr-only"
+        type="file"
+        multiple
+        :accept="accept"
+        @change="onPicked"
+      >
       <!-- The whole data region is a drop target for files from the desktop; the overlay
-           says which folder they would land in, and nothing else. -->
-      <div class="contents" @dragover="onListDragOver" @drop.prevent="onListDrop">
+           says which folder they would land in, and nothing else.
+
+           It is also the open folder's own menu — which is why it takes a tab stop: with no
+           buttons left on the screen, this is where a keyboard reaches Upload. -->
+      <div
+        class="contents"
+        tabindex="0"
+        role="group"
+        :aria-label="t('files.listRegion', { folder: folderName(currentFolder) })"
+        v-bind="press.on((at) => openMenu(listMenu, at))"
+        @dragover="onListDragOver"
+        @drop.prevent="onListDrop"
+        @contextmenu="openMenuFromPointer($event, listMenu)"
+        @keydown="openMenuFromKey($event, listMenu)"
+      >
         <UiPanel lead>
           <template #title>
             <!-- Each crumb is also a drop target: dropping a row on the folder you came
@@ -876,14 +965,7 @@ function rowAttrs(row: Row): Record<string, unknown> {
           <UiEmptyState
             v-else-if="data && !rows.length"
             :title="currentFolder === null ? t('files.empty') : t('files.emptyFolder')"
-          >
-            <template #action>
-              <UiButton variant="primary" @click="pickFiles">
-                <template #icon><UiIcon name="upload" /></template>
-                {{ t('files.upload') }}
-              </UiButton>
-            </template>
-          </UiEmptyState>
+          />
 
           <UiDataTable
             v-else-if="data"
@@ -978,45 +1060,6 @@ function rowAttrs(row: Row): Record<string, unknown> {
               </span>
             </template>
 
-            <template #cell-actions="{ row }">
-              <span v-if="row.kind !== 'upload'" class="row-actions">
-                <UiButton
-                  variant="ghost"
-                  size="xs"
-                  icon-only
-                  :label="
-                    row.kind === 'folder'
-                      ? `${t('files.renameFolder')}: ${rowName(row)}`
-                      : `${t('files.renameFile')}: ${rowName(row)}`
-                  "
-                  @click="openRename(row)"
-                >
-                  <template #icon><UiIcon name="edit" /></template>
-                </UiButton>
-                <UiButton
-                  variant="ghost"
-                  size="xs"
-                  icon-only
-                  :label="t('files.moveItem', { name: rowName(row) })"
-                  @click="((moving = row), (mutationError = null))"
-                >
-                  <template #icon><UiIcon name="folder-input" /></template>
-                </UiButton>
-                <UiButton
-                  variant="ghost"
-                  size="xs"
-                  icon-only
-                  :label="
-                    row.kind === 'folder'
-                      ? `${t('files.deleteFolder')}: ${rowName(row)}`
-                      : `${t('files.deleteFile')}: ${rowName(row)}`
-                  "
-                  @click="((deleting = row), (mutationError = null))"
-                >
-                  <template #icon><UiIcon name="trash" /></template>
-                </UiButton>
-              </span>
-            </template>
           </UiDataTable>
         </UiPanel>
 
@@ -1029,6 +1072,16 @@ function rowAttrs(row: Row): Record<string, unknown> {
         </div>
       </div>
     </UiRegion>
+
+    <UiContextMenu
+      v-if="menu"
+      :at="menu.at"
+      :items="menuItems"
+      :label="menuLabel"
+      :focus-first="menu.fromKey"
+      @select="runMenu"
+      @close="menu = null"
+    />
 
     <UiModal
       v-if="showNewFolder"
@@ -1135,20 +1188,20 @@ function rowAttrs(row: Row): Record<string, unknown> {
 </template>
 
 <style scoped>
-.actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
 /* The drop surface: it has to be the box the panel fills, so the overlay can cover exactly
-   the list and nothing else. */
+   the list and nothing else. It is also the list's menu target and a tab stop, so it takes
+   the app's focus ring rather than the browser's. */
 .contents {
   position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+}
+
+.contents:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .state {
@@ -1283,9 +1336,12 @@ function rowAttrs(row: Row): Record<string, unknown> {
   color: var(--muted);
 }
 
-.row-actions {
-  display: inline-flex;
-  gap: var(--space-1);
+/* A row is held, not selected: a long press that starts a text selection cannot become a
+   menu, and on iOS it raises the callout instead. Same reason a file manager's rows do not
+   select their text either. */
+.contents :deep(tbody tr) {
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 
 /* A folder row lit up as a drop target. Inset, so accepting a drop does not move the row. */
@@ -1328,7 +1384,8 @@ function rowAttrs(row: Row): Record<string, unknown> {
 }
 
 @media (max-width: 900px) {
-  /* The rail is above the list here, so the tree would push everything off the screen. */
+  /* The content region scrolls as a whole below the breakpoint, so the list must not be a
+     bounded grid row inside it. */
   .contents {
     display: block;
   }

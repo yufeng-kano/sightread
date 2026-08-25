@@ -1,0 +1,381 @@
+<script setup lang="ts">
+/**
+ * A context menu: a list of actions opened at a point (docs/web.md § Files).
+ *
+ * The page owns *what* it holds and *where* it was asked to open; this owns everything that
+ * makes a floating menu behave like one:
+ *
+ *  - **It fits.** Measured after mount and placed by `lib/menu.ts`, so a click near an edge
+ *    flips the menu rather than putting half of it outside the window.
+ *  - **It is a menu to a keyboard too.** `role="menu"` over `role="menuitem"` buttons, arrows
+ *    and Home/End to move, Enter or Space to choose, Escape to leave — and focus goes back to
+ *    whatever opened it, which is the row the reader was on. Focus lands on the menu itself
+ *    rather than on its first item, because focus is what draws the highlight: a menu that
+ *    opens with a row already lit is claiming the pointer is on that row.
+ *  - **It closes on anything that means "not this".** A press outside, a scroll under it, a
+ *    resize, a Tab out, another right-click. A menu still hanging over content that has moved
+ *    is the failure people remember from home-made menus.
+ *
+ * Teleported to `<body>`: the panel it opens from is a scroll container with its own stacking
+ * context, and a menu that clips at the panel edge is not a menu.
+ */
+import { placeMenu, type MenuItem, type Point } from '~/lib/menu'
+
+const props = defineProps<{
+  /** Where the gesture happened, in viewport coordinates. */
+  at: Point
+  items: MenuItem[]
+  /** The menu's accessible name — what it is about, e.g. the row's name. */
+  label: string
+  /** A line of context above the items, e.g. which account this menu belongs to. */
+  header?: string
+  /**
+   * Open with the first item already highlighted. For a menu opened from the keyboard, where
+   * the highlight *is* the cursor — a pointer-opened menu highlights nothing until the
+   * pointer picks a row, exactly as the platform's own menus behave.
+   */
+  focusFirst?: boolean
+}>()
+
+const emit = defineEmits<{ select: [string]; close: [] }>()
+
+const menu = ref<HTMLElement | null>(null)
+/** Off-screen until measured, so the first paint is never at the wrong place. */
+const position = ref<Point>({ x: -9999, y: -9999 })
+/** The corner the menu grows from — the pointer's, so a flipped menu opens back towards it. */
+const origin = ref('left top')
+/** Restored on unmount: closing a menu must not drop focus on `<body>`. */
+let previouslyFocused: HTMLElement | null = null
+
+/** Items are buttons, or links where the item is a destination — both are options here. */
+function options(): HTMLElement[] {
+  return [...(menu.value?.querySelectorAll<HTMLElement>('button:not([disabled]), a') ?? [])]
+}
+
+function focusAt(index: number) {
+  const all = options()
+  if (!all.length) {
+    return
+  }
+  // Wrapping, as a native menu does: past the last item is the first one.
+  all[((index % all.length) + all.length) % all.length]!.focus()
+}
+
+function step(delta: number) {
+  const all = options()
+  const from = all.indexOf(document.activeElement as HTMLElement)
+  focusAt(from < 0 ? (delta > 0 ? 0 : -1) : from + delta)
+}
+
+function onKeydown(event: KeyboardEvent) {
+  switch (event.key) {
+    case 'Escape':
+      event.stopPropagation()
+      emit('close')
+      break
+    case 'ArrowDown':
+      event.preventDefault()
+      step(1)
+      break
+    case 'ArrowUp':
+      event.preventDefault()
+      step(-1)
+      break
+    case 'Home':
+      event.preventDefault()
+      focusAt(0)
+      break
+    case 'End':
+      event.preventDefault()
+      focusAt(-1)
+      break
+    case 'Tab':
+      // Tabbing away is leaving, and the browser's own focus move is the right one.
+      emit('close')
+      break
+  }
+}
+
+function onPointerdownOutside(event: PointerEvent) {
+  if (!menu.value?.contains(event.target as Node)) {
+    emit('close')
+  }
+}
+
+/** A second right-click closes this menu; the page opens the next one from its own handler. */
+function onContextmenuOutside(event: MouseEvent) {
+  if (!menu.value?.contains(event.target as Node)) {
+    emit('close')
+  }
+}
+
+function close() {
+  emit('close')
+}
+
+/** Measured after the items are in the DOM, because where it fits depends on how big it is. */
+async function place() {
+  await nextTick()
+  const element = menu.value
+  const box = element?.getBoundingClientRect()
+  if (element && box) {
+    const at = placeMenu(
+      props.at,
+      { width: box.width, height: box.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
+    position.value = at
+    origin.value = `${at.x < props.at.x ? 'right' : 'left'} ${at.y < props.at.y ? 'bottom' : 'top'}`
+    // Reopened on another row, the same element is reused and its opening animation would
+    // not run again — so it is restarted by hand. The read is what forces the reflow.
+    element.style.animation = 'none'
+    void element.offsetHeight
+    element.style.animation = ''
+  }
+  if (props.focusFirst) {
+    focusAt(0)
+  } else {
+    // The menu, not an item: nothing is highlighted until the pointer or an arrow key picks
+    // a row, while Escape and the arrows still have somewhere to land.
+    menu.value?.focus()
+  }
+}
+
+/**
+ * Opened again while it was already open — a right-click on another row. The page closes and
+ * reopens in one tick, so this component is reused rather than remounted and `onMounted`
+ * never runs again; without this the second menu would draw at the first one's point.
+ */
+watch(() => props.at, place)
+
+onMounted(() => {
+  previouslyFocused = document.activeElement as HTMLElement | null
+  void place()
+  window.addEventListener('pointerdown', onPointerdownOutside, true)
+  window.addEventListener('contextmenu', onContextmenuOutside, true)
+  window.addEventListener('resize', close)
+  // Capture, because the scroll that matters happens inside a panel, not on the window.
+  window.addEventListener('scroll', close, true)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', onPointerdownOutside, true)
+  window.removeEventListener('contextmenu', onContextmenuOutside, true)
+  window.removeEventListener('resize', close)
+  window.removeEventListener('scroll', close, true)
+  previouslyFocused?.focus?.()
+})
+
+function choose(item: MenuItem) {
+  if (item.disabled) {
+    return
+  }
+  emit('select', item.key)
+  emit('close')
+}
+</script>
+
+<template>
+  <Teleport to="body">
+    <div
+      ref="menu"
+      class="menu"
+      role="menu"
+      tabindex="-1"
+      :aria-label="label"
+      :style="{
+        left: `${position.x}px`,
+        top: `${position.y}px`,
+        transformOrigin: origin,
+      }"
+      @keydown="onKeydown"
+      @contextmenu.prevent
+    >
+      <p v-if="header" class="header">{{ header }}</p>
+
+      <template v-for="item in items" :key="item.key">
+        <!-- A destination is a real link: it can be opened in a new tab, and the locale
+             items are URLs rather than actions. -->
+        <NuxtLink
+          v-if="item.to"
+          :to="item.to"
+          :role="item.checked === undefined ? 'menuitem' : 'menuitemradio'"
+          :aria-checked="item.checked"
+          tabindex="-1"
+          class="item"
+          :class="{ danger: item.danger, separated: item.separated }"
+          @click="choose(item)"
+        >
+          <UiIcon v-if="item.checked" name="check" />
+          <UiIcon v-else-if="item.icon" :name="item.icon" />
+          <span v-else class="icon-space" />
+          {{ item.label }}
+        </NuxtLink>
+
+        <button
+          v-else
+          type="button"
+          :role="item.checked === undefined ? 'menuitem' : 'menuitemradio'"
+          :aria-checked="item.checked"
+          tabindex="-1"
+          class="item"
+          :class="{ danger: item.danger, separated: item.separated }"
+          :disabled="item.disabled"
+          @click="choose(item)"
+        >
+          <UiIcon v-if="item.checked" name="check" />
+          <UiIcon v-else-if="item.icon" :name="item.icon" />
+          <span v-else class="icon-space" />
+          {{ item.label }}
+        </button>
+      </template>
+    </div>
+  </Teleport>
+</template>
+
+<style scoped>
+/*
+ * A floating surface, built the way the platform builds one: rounded, hairlined, translucent
+ * over what it covers, and lifted by a two-part shadow — a tight contact shadow so the edge
+ * reads, and a wide soft one for the height. This is the design's one exception to flat
+ * square paper, and it is deliberate: a menu that shares the page's geometry looks pasted
+ * into it (docs/web.md § Design system).
+ */
+.menu {
+  position: fixed;
+  /* Focused on open so the keys have a home, but it is a container, not a control: the
+     highlight belongs to whichever row the pointer or an arrow key picks. */
+  outline: none;
+  z-index: 90;
+  min-width: 200px;
+  max-width: 300px;
+  padding: var(--space-1);
+  border-radius: var(--radius-menu);
+  border: 1px solid var(--menu-edge);
+  background: var(--menu-surface);
+  box-shadow: var(--shadow-menu);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  /* The pop: a menu appears, it does not fade in place. The origin is the corner the menu
+     opened from, which `place()` sets — a flipped menu grows back towards the pointer. */
+  animation: menu-in var(--duration-fast) var(--ease-enter);
+}
+
+/* Without blur support the translucency would leave text over text, so the surface goes
+   opaque instead. */
+@supports not (backdrop-filter: blur(1px)) {
+  .menu {
+    background: var(--paper);
+  }
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu {
+    animation: none;
+  }
+}
+
+/* Who or what the menu is about — a fact, not an item: it takes no focus and does nothing.
+   Ellipsized because an email address is as long as it is. */
+.header {
+  margin: 0;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-menu-item);
+  background: none;
+  color: var(--ink);
+  font-size: var(--text-sm);
+  text-align: left;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: default;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+/*
+ * The group rule: a line in the gap above the item, inset from the rounded edge. Drawn as a
+ * pseudo-element rather than a real one, which would end up focusable or read out as an item
+ * of its own — and rather than a border, which the highlight would swallow.
+ */
+.item.separated {
+  margin-top: calc(2 * var(--space-1) + 1px);
+}
+
+.item.separated::before {
+  content: '';
+  position: absolute;
+  right: var(--space-2);
+  left: var(--space-2);
+  top: calc(-1 * var(--space-1) - 1px);
+  height: 1px;
+  background: var(--menu-edge);
+}
+
+/*
+ * The highlight is the accent, filled, and it is the one place the accent covers a surface.
+ * It earns it: the highlighted row is the action about to be committed, which is exactly
+ * what the accent is reserved for.
+ */
+.item:hover,
+.item:focus {
+  background: var(--accent);
+  color: var(--accent-fg);
+  outline: none;
+}
+
+.item:hover :deep(svg),
+.item:focus :deep(svg) {
+  color: currentcolor;
+}
+
+.item:disabled {
+  color: var(--faint);
+  background: none;
+}
+
+.item.danger {
+  color: var(--danger);
+}
+
+.item.danger:hover,
+.item.danger:focus {
+  background: var(--danger);
+  color: var(--accent-fg);
+}
+
+.item :deep(svg) {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  color: var(--faint);
+}
+
+.icon-space {
+  width: 15px;
+  flex-shrink: 0;
+}
+</style>

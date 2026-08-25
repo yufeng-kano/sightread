@@ -10,11 +10,16 @@
  * `min-width: 0` on the tracks is load-bearing: a grid track defaults to `auto`, and one
  * table's own minimum width would otherwise widen the screen past the viewport rather than
  * scrolling inside its panel.
+ *
+ * `full` drops the rail column for a screen that has no margin to write in — the library,
+ * whose navigation is its own breadcrumb and whose actions are in its context menu. Without
+ * it the grid would keep the empty column and the data region would start 280px in.
  */
+defineProps<{ full?: boolean }>()
 </script>
 
 <template>
-  <div class="screen">
+  <div class="screen" :class="{ full }">
     <slot />
   </div>
 </template>
@@ -26,6 +31,10 @@
   min-width: 0;
   min-height: 0;
   background: var(--paper);
+}
+
+.screen.full {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 /* One column below the breakpoint: the rail collapses above the data region, and the
