@@ -466,6 +466,17 @@ describe('parseInline', () => {
     ])
   })
 
+  it('treats an even backslash run as escaping itself, not the marker', () => {
+    expect(parseInline('\\\\*word*')).toEqual([
+      { kind: 'text', text: '\\\\' },
+      { kind: 'em', segments: [{ kind: 'text', text: 'word' }], src: '*word*' },
+    ])
+    expect(parseInline('\\\\`$x$`')).toEqual([
+      { kind: 'text', text: '\\\\' },
+      { kind: 'code', text: '$x$', src: '`$x$`' },
+    ])
+  })
+
   it('keeps dollars inside a code span as code, not math', () => {
     expect(parseInline('write `$x$` literally')).toEqual([
       { kind: 'text', text: 'write ' },

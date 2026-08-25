@@ -364,6 +364,19 @@ const STRONG_UND_AT = /^__(?!\s)((?:`[^`\n]*`|[^_\n]|_(?!_))+?)(?<=\S)(?<!\\)__(
 const EM_UND_AT = /^_(?![\s_])((?:`[^`\n]*`|[^_\n])+?)(?<=\S)(?<!\\)_(?![\p{L}\p{N}_])/u
 
 /**
+ * A marker at `index` is escaped only when an *odd* run of backslashes precedes it: in
+ * `\*word*` the asterisk is literal, but in `\\*word*` the first backslash escapes the
+ * second and the asterisk is a live delimiter.
+ */
+function isEscaped(text: string, index: number): boolean {
+  let count = 0
+  while (index - 1 - count >= 0 && text[index - 1 - count] === '\\') {
+    count += 1
+  }
+  return count % 2 === 1
+}
+
+/**
  * Parses the styled-inline shapes — emphasis, code, `<br>` — inside one math-free run of
  * text. Recursive for nesting (`_**Abstract**_` is an `em` holding a `strong`); anything
  * that fails a marker's rules stays literal text, which is also the wrong-guess fallback:
@@ -396,7 +409,7 @@ function parseStyled(text: string): InlineSegment[] {
     // A backslash-escaped marker is that literal character, never a delimiter — GFM's
     // `\*literal\*` must not open emphasis. The backslash stays visible, like every
     // other shape this parser declines to interpret.
-    if (text[scan - 1] === '\\') {
+    if (isEscaped(text, scan)) {
       scan += 1
       continue
     }
@@ -487,7 +500,7 @@ export function parseInline(text: string): InlineSegment[] {
     // here and swallow a real formula behind it.
     const tick = text.indexOf('`', scan)
     if (tick !== -1 && (open === -1 || tick < open)) {
-      const code = text[tick - 1] === '\\' ? null : CODE_AT.exec(text.slice(tick))
+      const code = isEscaped(text, tick) ? null : CODE_AT.exec(text.slice(tick))
       scan = tick + (code ? code[0].length : 1)
       continue
     }
