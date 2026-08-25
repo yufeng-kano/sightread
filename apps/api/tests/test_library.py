@@ -13,10 +13,10 @@ from pathlib import Path
 import httpx
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from sightread.auth.sessions import SESSION_COOKIE, create_session
-from sightread.db.models import Document, Job, Result, User
+from sightread.db.models import Document, Job, JobPage, Result, User
 from sightread.routes.library import DOCUMENT_NAME_MAX, free_name
 from tests.conftest import CSRF_HEADERS
 
@@ -329,8 +329,11 @@ async def test_a_document_serves_the_result_of_its_own_job(
 ) -> None:
     created = (await _upload(library, documents)).json()
 
+    # Queued with no result: a partial answer, empty so far (docs/api.md § Partial results).
     pending = await library.get(f"/api/library/documents/{created['id']}/result")
-    assert pending.status_code == 404
+    assert pending.status_code == 200
+    assert pending.json()["meta"]["partial"] is True
+    assert pending.json()["markdown"] == ""
 
     async with sessionmaker() as db:
         db.add(
@@ -348,6 +351,67 @@ async def test_a_document_serves_the_result_of_its_own_job(
     ready = await library.get(f"/api/library/documents/{created['id']}/result")
     assert ready.status_code == 200
     assert ready.json()["markdown"].endswith("# Title")
+
+
+async def test_a_running_document_serves_its_finished_pages(
+    library, sessionmaker, documents
+) -> None:
+    """Partial results: the finished pages, assembled, while the job still runs
+    (docs/api.md § Partial results)."""
+    created = (await _upload(library, documents)).json()
+    job_id = uuid.UUID(created["job_id"])
+
+    async with sessionmaker() as db:
+        await db.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(status="running", page_count=3, pages_done=2)
+        )
+        db.add(
+            JobPage(
+                job_id=job_id,
+                page_no=1,
+                method="vision",
+                status="succeeded",
+                # The model's own page claim ("p9") must be renumbered to ours, exactly as
+                # the final assembly does.
+                markdown="# One\n\n![fig](sightread://p9/10,20,30,40)\nFigure 1: chart",
+            )
+        )
+        db.add(JobPage(job_id=job_id, page_no=2, status="failed", error="render failed"))
+        await db.commit()
+
+    response = await library.get(f"/api/library/documents/{created['id']}/result")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["meta"]["partial"] is True
+    assert (body["meta"]["page_count"], body["meta"]["pages_done"]) == (3, 2)
+    assert "<!-- page: 1 -->" in body["markdown"]
+    assert "![fig1](sightread://p1/10,20,30,40)" in body["markdown"]
+    assert body["figures"] == [
+        {"id": "fig1", "page": 1, "bbox": [10, 20, 30, 40], "caption": "Figure 1: chart"}
+    ]
+    assert body["errors"] == [{"page": 2, "reason": "render failed"}]
+    assert [page["page"] for page in body["pages"]] == [1, 2]
+
+
+async def test_a_documents_stored_figure_crop_is_served(library, tmp_path, documents) -> None:
+    created = (await _upload(library, documents)).json()
+
+    crop = tmp_path / "figures" / created["job_id"] / "p1_10_20_30_40.png"
+    crop.parent.mkdir(parents=True)
+    crop.write_bytes(documents["png"].read_bytes())
+
+    ok = await library.get(f"/api/library/documents/{created['id']}/figures/1/10,20,30,40")
+    assert ok.status_code == 200
+    assert ok.headers["content-type"] == "image/png"
+    assert ok.content == documents["png"].read_bytes()
+
+    # No crop stored for this box, and a bbox that is not one — both are plain 404s.
+    missing = await library.get(f"/api/library/documents/{created['id']}/figures/1/10,20,30,41")
+    assert missing.status_code == 404
+    invalid = await library.get(f"/api/library/documents/{created['id']}/figures/1/evil")
+    assert invalid.status_code == 404
 
 
 # --- ownership and CSRF ---------------------------------------------------------------

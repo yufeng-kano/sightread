@@ -37,6 +37,19 @@ Markers are how a caller maps any passage back to its page (citations, cross-che
 - Placeholder: `![fig{n}](sightread://p{page}/{ymin},{xmin},{ymax},{xmax})`, caption verbatim on the next line.
 - Figure ids are document-wide (`fig1`, `fig2`, …) and the page number is **ours**, not the model's: the model emits the placeholder in place and the assembler renumbers it. Boxes are clamped to 0–1000; a box that is still degenerate (zero or negative area) is dropped, never guessed at.
 
+## Figure crops
+
+The page image a vision call already rendered is also where figures are cropped from, at the one moment it exists ([jobs.md](./jobs.md) deletes rendered pages immediately after the call):
+
+- After a page transcribes, every placeholder in that page's markdown is cropped from the rendered PNG with Pillow (raster work on our own render — not PDF work, so the Poppler-only rule is untouched) and written to `FIGURES_DIR/{job_id}/p{page}_{ymin}_{xmin}_{ymax}_{xmax}.png`.
+- The filename is the cleaned bbox under **our** page number — the same clamping and renumbering `assemble` applies — so a crop is addressable from any placeholder without waiting for document-wide figure ids.
+- Crops get a 2% margin per side (the same margin the API docs tell callers to add), clamped to the page.
+- A crop that fails is logged and skipped; it never fails the page. A figure whose crop is missing (old results, failed crop) simply renders as a placeholder in the viewer.
+- Writes are atomic (encode to a staging name, rename): a partial result can point the viewer at a crop mid-encode, and an existing name must never stream as a truncated PNG. The figure routes answer with `Cache-Control: private, no-store` — a browser cache keys on the URL, not the session, and a cached crop must not outlive a sign-out.
+- At most `FIGURES_PER_PAGE_MAX` (default 40) crops per page, in reading order; the excess is logged and skipped. The upstream response body is already capped, but a malicious or malfunctioning user-defined endpoint could otherwise turn one small response into unbounded PNG encodes and durable disk under the shared figures volume.
+- Crop work runs in a thread the event loop cannot cancel, so writing and discarding are serialized under one per-job lock: a failed or interrupted job's cleanup waits out any in-flight crop and marks the job's figures discarded, after which a late crop thread writes nothing — the directory of an abandoned attempt cannot be recreated behind the cleanup.
+- Crops persist with the result (kept indefinitely, like `results`), under `FIGURES_DIR` — outside the upload dir, so the sweeper never touches them. They are served to the signed-in owner by control-plane routes only ([api.md](./api.md)); the data plane still ships coordinates, not image bytes.
+
 ## Prompts
 
 The transcription prompt is a template with two tokens, `{page}` and `{bbox_format}`, substituted per call (plain string replacement — a template with stray braces must not break a job).

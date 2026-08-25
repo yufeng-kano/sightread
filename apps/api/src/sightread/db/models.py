@@ -259,6 +259,9 @@ class JobPage(Base):
     method: Mapped[str | None] = mapped_column(String(16), nullable=True)  # vision
     status: Mapped[str] = mapped_column(String(16))
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The page's transcription, written as the page finishes — what a partial result reads
+    # (docs/jobs.md § Progress). NULL on failed pages and rows predating the column.
+    markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Result(Base):

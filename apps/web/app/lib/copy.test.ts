@@ -1,0 +1,178 @@
+import { describe, expect, it } from 'vitest'
+import { cellGroupsToMarkdown, nodesToMarkdown, type MarkdownNode } from './copy'
+
+/** Minimal DOM stand-ins — the serializer reads a structural subset of `Node`. */
+function el(
+  tagName: string,
+  attrs: Record<string, string> = {},
+  childNodes: MarkdownNode[] = [],
+): MarkdownNode {
+  return {
+    nodeType: 1,
+    tagName: tagName.toUpperCase(),
+    childNodes,
+    getAttribute: (name: string) => attrs[name] ?? null,
+    textContent: childNodes.map((child) => child.textContent ?? '').join(''),
+  }
+}
+
+function text(content: string): MarkdownNode {
+  return { nodeType: 3, textContent: content }
+}
+
+function mathSpan(tex: string, rendered: string): MarkdownNode {
+  return el('span', { class: 'md-inline-math', 'data-tex': tex }, [text(rendered)])
+}
+
+describe('nodesToMarkdown', () => {
+  it('turns a table back into a pipe table, math and escaped pipes included', () => {
+    const table = el('table', { class: 'md-table' }, [
+      el('thead', {}, [
+        el('tr', {}, [
+          el('th', {}, [text('Name')]),
+          el('th', {}, [text('Value')]),
+        ]),
+      ]),
+      el('tbody', {}, [
+        el('tr', {}, [
+          el('td', {}, [text('H'), mathSpan('$_2$', '2'), text('O')]),
+          el('td', {}, [text('a|b')]),
+        ]),
+      ]),
+    ])
+
+    expect(nodesToMarkdown([el('div', { class: 'md-table-wrap' }, [table])])).toBe(
+      ['| Name | Value |', '| --- | --- |', '| H$_2$O | a\\|b |'].join('\n'),
+    )
+  })
+
+  it('gives a partial table selection a separator so it stays a table', () => {
+    const partial = el('table', {}, [
+      el('tbody', {}, [
+        el('tr', {}, [el('td', {}, [text('EMEA')]), el('td', {}, [text('903')])]),
+      ]),
+    ])
+
+    expect(nodesToMarkdown([partial])).toBe(['| EMEA | 903 |', '| --- | --- |'].join('\n'))
+  })
+
+  it('serializes headings, lists, code and display math by their viewer classes', () => {
+    const nodes = [
+      el('h3', { class: 'md-h2' }, [text('Results')]),
+      el('ol', { start: '5', class: 'md-list' }, [
+        el('li', {}, [text('Fifth')]),
+        el('li', {}, [text('Sixth')]),
+      ]),
+      el('pre', { class: 'md-math' }, [text('E = mc^2')]),
+      el('pre', { class: 'md-math' }, [
+        el('code', { class: 'language-python' }, [text('print(1)')]),
+      ]),
+    ]
+
+    expect(nodesToMarkdown(nodes)).toBe(
+      [
+        '## Results',
+        '5. Fifth\n6. Sixth',
+        '$$\nE = mc^2\n$$',
+        '```python\nprint(1)\n```',
+      ].join('\n\n'),
+    )
+  })
+
+  it('keeps the source heading depth from data-level', () => {
+    const nodes = [
+      el('h3', { class: 'md-h2', 'data-level': '1' }, [text('Top')]),
+      el('h4', { class: 'md-h3', 'data-level': '4' }, [text('Deep')]),
+    ]
+
+    expect(nodesToMarkdown(nodes)).toBe('# Top\n\n#### Deep')
+  })
+
+  it('hands a figure back as its stored placeholder source', () => {
+    const figure = el(
+      'figure',
+      { class: 'md-figure', 'data-md': '![fig1](sightread://p3/10,20,30,40)\nFigure 1: chart' },
+      [el('div', { class: 'figure-frame' }, [text('No stored crop for this figure')])],
+    )
+
+    expect(nodesToMarkdown([figure])).toBe('![fig1](sightread://p3/10,20,30,40)\nFigure 1: chart')
+  })
+
+  it('keeps a selection inside one paragraph as one line of text', () => {
+    const nodes = [text('Qingwen Bu'), mathSpan('$^{1,2}$', '1,2'), text(' and others')]
+
+    expect(nodesToMarkdown(nodes)).toBe('Qingwen Bu$^{1,2}$ and others')
+  })
+
+  it('separates whole blocks with blank lines and drops page markers', () => {
+    const section = el('section', { class: 'page' }, [
+      el('p', { class: 'eyebrow sm page-marker' }, [text('Page 1')]),
+      el('article', { class: 'prose' }, [
+        el('h4', { class: 'md-h3' }, [text('Notes')]),
+        el('p', { class: 'md-p' }, [text('Body text.')]),
+      ]),
+    ])
+
+    expect(nodesToMarkdown([section])).toBe('### Notes\n\nBody text.')
+  })
+})
+
+describe('nodesToMarkdown on selections that lost their structural root', () => {
+  // Range.cloneContents() copies the parent chain only up to — exclusive of — the common
+  // ancestor, so a drag across one table hands over bare thead/tbody/tr, one row hands
+  // over bare cells, and a list hands over bare li.
+  it('reassembles orphaned thead/tbody/tr runs into one table', () => {
+    const nodes = [
+      el('thead', {}, [
+        el('tr', {}, [el('th', {}, [text('Name')]), el('th', {}, [text('Value')])]),
+      ]),
+      text('\n  '),
+      el('tbody', {}, [
+        el('tr', {}, [el('td', {}, [text('APAC')]), el('td', {}, [text('1,204')])]),
+      ]),
+      el('tr', {}, [el('td', {}, [text('EMEA')]), el('td', {}, [text('903')])]),
+    ]
+
+    expect(nodesToMarkdown(nodes)).toBe(
+      [
+        '| Name | Value |',
+        '| --- | --- |',
+        '| APAC | 1,204 |',
+        '| EMEA | 903 |',
+      ].join('\n'),
+    )
+  })
+
+  it('reassembles orphaned cells into one row', () => {
+    const nodes = [el('td', {}, [text('a')]), el('td', {}, [text('b')])]
+
+    expect(nodesToMarkdown(nodes)).toBe(['| a | b |', '| --- | --- |'].join('\n'))
+  })
+
+  it('reassembles orphaned list items into one bulleted list', () => {
+    const nodes = [el('li', {}, [text('First')]), el('li', {}, [text('Second')])]
+
+    expect(nodesToMarkdown(nodes)).toBe('- First\n- Second')
+  })
+
+  it('keeps an ordered selection ordered when the live range supplies its list context', () => {
+    const nodes = [el('li', {}, [text('Review')]), el('li', {}, [text('Submit')])]
+
+    expect(nodesToMarkdown(nodes, { ordered: true, start: 5 })).toBe('5. Review\n6. Submit')
+  })
+})
+
+describe('cellGroupsToMarkdown', () => {
+  // Firefox reports a table-region selection as one range per cell; the copy handler
+  // groups the live cells by row and this turns the groups into the one selected table.
+  it('serializes row-grouped cells as one pipe table', () => {
+    const rows = [
+      [el('th', {}, [text('Name')]), el('th', {}, [text('Value')])],
+      [el('td', {}, [text('APAC')]), el('td', {}, [text('1,204')])],
+    ]
+
+    expect(cellGroupsToMarkdown(rows)).toBe(
+      ['| Name | Value |', '| --- | --- |', '| APAC | 1,204 |'].join('\n'),
+    )
+  })
+})

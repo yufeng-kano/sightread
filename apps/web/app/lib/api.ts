@@ -165,9 +165,10 @@ export interface JobSummary {
 
 export interface ResultPage {
   page: number
-  width_pt: number
-  height_pt: number
-  method: 'vision'
+  /** Absent on a partial result's pages — only the final outcome knows the dimensions. */
+  width_pt?: number
+  height_pt?: number
+  method: 'vision' | null
   error: string | null
 }
 
@@ -192,6 +193,10 @@ export interface ResultMeta {
   pipeline_version: number
   sha256: string
   cached: boolean
+  /** True on a running job's snapshot — never cache one (docs/api.md § Partial results). */
+  partial?: boolean
+  page_count?: number | null
+  pages_done?: number
 }
 
 export interface JobResult {

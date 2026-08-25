@@ -26,6 +26,7 @@ services:
         required: false
     environment:
       UPLOAD_DIR: /data/uploads
+      FIGURES_DIR: /data/figures
     depends_on:
       pg:
         condition: service_healthy
@@ -33,9 +34,18 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - uploads:/data/uploads
+      - figures:/data/figures
     command: >
       sh -c "alembic upgrade head &&
       uvicorn sightread.main:app --host 0.0.0.0 --port 8000"
+    # Healthy only once /healthz answers, i.e. after migrations finished (the production
+    # file explains why the worker gates on this).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   worker:
     # Same image as the api; only the command differs (docs/project-structure.md).
@@ -46,11 +56,15 @@ services:
         required: false
     environment:
       UPLOAD_DIR: /data/uploads
+      FIGURES_DIR: /data/figures
     depends_on:
       pg:
         condition: service_healthy
+      api:
+        condition: service_healthy
     volumes:
       - uploads:/data/uploads
+      - figures:/data/figures
     command: ["python", "-m", "sightread.worker"]
 
   web:
@@ -76,3 +90,4 @@ services:
 volumes:
   pgdata:
   uploads:
+  figures:

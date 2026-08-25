@@ -74,7 +74,7 @@
      translucent over whatever it covers, hairlined, and rounded, so it reads as hovering
      above the page rather than cut into it. Its own tokens because nothing else in the app
      is built this way (docs/web.md § Design system). */
-  --menu-surface: rgb(252 252 253 / 72%);
+  --menu-surface: rgb(252 252 253 / 98%);
   --menu-edge: rgb(21 24 28 / 14%);
   --shadow-menu:
     0 1px 2px rgb(21 24 28 / 8%), 0 12px 32px rgb(21 24 28 / 16%);
@@ -225,7 +225,7 @@
     --danger-hover: #221715;
     --overlay: rgb(6 8 10 / 62%);
     --shadow-dialog: 0 24px 60px rgb(0 0 0 / 55%);
-    --menu-surface: rgb(38 43 50 / 76%);
+    --menu-surface: rgb(38 43 50 / 98%);
     --menu-edge: rgb(255 255 255 / 12%);
     --shadow-menu:
       0 1px 2px rgb(0 0 0 / 40%), 0 12px 32px rgb(0 0 0 / 50%);

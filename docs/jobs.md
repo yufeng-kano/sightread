@@ -31,6 +31,8 @@ Fairness: the claim query above is FIFO; per-user cap is enforced at claim time 
 
 Worker updates `jobs.pages_done` and `job_pages` rows as pages finish; SSE endpoints read from PG (LISTEN/NOTIFY for wakeup, poll fallback). Terminal jobs replay their final event on reconnect.
 
+Each finished page's markdown is stored on its `job_pages` row (`markdown`, NULL for a failed page), so a running job has a readable partial result: the control-plane result routes assemble the finished pages with the same `assemble` the final result uses and answer 200 with `meta.partial: true` while the job is queued or running ([api.md](./api.md)). The final `results` row is still written whole at terminal state and is the only thing the dedup cache ever serves; `requeue_job` deletes `job_pages` rows as before, partial markdown included, so an interrupted job reparses from scratch.
+
 ## Dedup cache
 
 Key: `(user_id, sha256, model, connection_id, connection_base_url, profile, profile_version, pages_spec, prompt_sha256, PIPELINE_VERSION)` — `connection_id` because the same model id on two different endpoints is not the same model, and `connection_base_url` (the endpoint snapshot) because *editing* a connection's URL repoints what that id means: results parsed through the old endpoint must not answer uploads aimed at the new one. The snapshot is taken at enqueue and **reconciled at claim time**: if the connection's URL changed while the job sat queued, the worker updates the job's snapshot to the endpoint it actually calls, so the cached result is keyed by the URL that truly produced it. A key rotation alone does not invalidate the cache — same endpoint, same model, same output.
@@ -43,7 +45,9 @@ Key: `(user_id, sha256, model, connection_id, connection_base_url, profile, prof
 
 ## Retention — two layers, sweeper is the guarantee
 
-1. **Immediate:** source file (and rendered page images) deleted the moment a job reaches `succeeded`/`failed`. After that, reparsing requires re-upload — accepted trade-off, documented here on purpose.
-2. **Sweeper:** periodic task inside the worker (every 15 min) trashes anything under the upload dir older than 24 h — catches crashed jobs, abandoned uploads, bugs. The sweeper is the guarantee; immediate deletion is an optimization.
+1. **Immediate:** source file (and rendered page images) deleted the moment a job reaches `succeeded`/`failed` — figure crops are taken from the rendered page *before* it is deleted ([parsing.md](./parsing.md) § Figure crops). After that, reparsing requires re-upload — accepted trade-off, documented here on purpose.
+2. **Sweeper:** periodic task inside the worker (every 15 min) trashes anything under the upload dir older than 24 h — catches crashed jobs, abandoned uploads, bugs. The sweeper is the guarantee; immediate deletion is an optimization. `FIGURES_DIR` is outside the upload dir precisely so the sweeper cannot eat stored crops.
 
-Results (markdown + metadata in PG) are kept **indefinitely** for now (low traffic); revisit when storage says otherwise. Usage rows are permanent — they are the billing history.
+Crops live exactly as long as something references them: a job that ends `failed` has its crop directory removed with the result it never wrote, and a shutdown requeue removes it with the rest of the partial progress — the reparse writes fresh crops, so nothing stale from the first attempt can answer a figure route.
+
+Results (markdown + metadata in PG) and figure crops (`FIGURES_DIR`) are kept **indefinitely** for now (low traffic); revisit when storage says otherwise. Usage rows are permanent — they are the billing history.

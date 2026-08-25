@@ -96,12 +96,18 @@ Preset profiles (id, name, model, bbox_format, description).
 | `GET/POST /api/prompts`, `PUT/DELETE /api/prompts/{id}` | prompt presets (`{id, name, text}`); text capped at `SYSTEM_PROMPT_MAX_CHARS`; deleting the selected preset falls back to the default prompt |
 | `PUT /api/settings` | default model / profile (OpenRouter-only defaults) / `default_connection_id` / `prompt_preset_id` (partial update: only the fields present in the body change; `null` restores the respective default). `default_profile` is refused when a custom connection is selected — profiles run on OpenRouter only; a connection's model lives on the connection itself |
 | `GET /api/usage?days=30` | per-day and per-model aggregates of tokens + cost from `usage_log` |
-| `GET /api/jobs?limit=50` | recent jobs (history): `job_id`, `kind`, `filename`, `status`, `model`, `profile`, `page_count`, `pages_done`, `error`, timestamps — no per-job cost (usage is aggregated per day/model only); `GET /api/jobs/{id}/result` same payload as data plane |
+| `GET /api/jobs?limit=50` | recent jobs (history): `job_id`, `kind`, `filename`, `status`, `model`, `profile`, `page_count`, `pages_done`, `error`, timestamps — no per-job cost (usage is aggregated per day/model only); `GET /api/jobs/{id}/result` same payload as data plane, plus partial results (below) |
+| `GET /api/jobs/{id}/figures/{page}/{ymin},{xmin},{ymax},{xmax}` | one stored figure crop as `image/png`, addressed exactly as its `sightread://` placeholder addresses it; 404 when no crop was stored (old results, failed crop). Control plane only — the data plane ships coordinates, not image bytes ([parsing.md](./parsing.md) § Figure crops) |
 | `GET /api/library` | the whole file library in one read: `{folders: [...], documents: [...]}`. A document carries its own fields (`id`, `folder_id`, `name`, `job_id`) plus the parse's live state (`status`, `kind`, `model`, `page_count`, `pages_done`, `size_bytes`, `error`, `created_at`, `finished_at`) — the browser needs no second request to render a row or its progress |
 | `POST /api/library/folders`, `PUT/DELETE /api/library/folders/{id}` | create (`name`, optional `parent_id`) / rename **and** move (partial: only the fields present change) / delete. Deleting cascades to the subtree; a `parent_id` inside the folder's own subtree is refused (a directory cannot contain itself). A name that is already taken is suffixed ` (2)` on create and on move, and answers 409 on a rename |
 | `POST /api/library/documents` | **the web upload.** Multipart `file` + optional `folder_id`, streamed to disk by the same `jobs.intake` sequence `/v1/parse` runs, then a document row naming the job. 201 with the document; a dedup hit points at the cached job and is already `succeeded`, and a retry of an upload that already landed points at the job still running for it rather than starting a second parse ([jobs.md](./jobs.md) § Dedup) |
 | `PUT/DELETE /api/library/documents/{id}` | rename / move (`name`, `folder_id`) / delete the library entry. Deleting removes the entry, never the job or its result ([database.md](./database.md) § Rules) |
-| `GET /api/library/documents/{id}/result` | the document's result, same payload as the data plane's `/result` |
+| `GET /api/library/documents/{id}/result` | the document's result, same payload as the data plane's `/result`, plus partial results (below) |
+| `GET /api/library/documents/{id}/figures/{page}/{ymin},{xmin},{ymax},{xmax}` | the document's stored figure crop, same contract as the jobs route above |
+
+### Partial results (control plane only)
+
+While a job is still `queued` or `running`, the two control-plane result routes answer **200 with a partial result** instead of 404: the finished pages' stored markdown ([jobs.md](./jobs.md) § Progress) assembled exactly like the final document — page markers, renumbered figure placeholders — with `meta.partial: true`, `pages` listing only the finished pages, and `meta.page_count`/`meta.pages_done` carrying live progress. Figure ids are per-snapshot (a page finishing out of order renumbers them), so nothing may cache a partial result; the viewer re-reads until `partial` disappears. The data plane is unchanged: `/v1/jobs/{id}/result` stays 404 until the job finishes, and SSE remains its progressive interface.
 
 ### Why the web upload is a control-plane route
 
@@ -112,5 +118,6 @@ Preset profiles (id, name, model, bbox_format, description).
 - `UPLOAD_MAX_BYTES` = 134217728 (128 MB) — enforced in the app **and** in Caddy; keep in sync ([deployment.md](./deployment.md)).
 - `PAGE_CAP` = 500, `MAX_JOBS_PER_USER` = 2 concurrent, `VISION_CONCURRENCY_PER_JOB` = 8.
 - `SYSTEM_PROMPT_MAX_CHARS` = 8000 — cap on a prompt preset's text.
+- `FIGURES_PER_PAGE_MAX` = 40 — cap on stored figure crops per page ([parsing.md](./parsing.md) § Figure crops).
 - `UPSTREAM_RESPONSE_MAX_BYTES` = 33554432 (32 MB) — cap on any upstream response body (model catalogs and vision completions); beyond it the call fails as `upstream` ([parsing.md](./parsing.md) § Upstream usage).
 - 429 with `Retry-After` when the per-user job cap is hit; upstream 402 (OpenRouter credits exhausted) maps to `payment` and fails only the affected pages.

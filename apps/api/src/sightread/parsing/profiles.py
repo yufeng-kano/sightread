@@ -18,7 +18,7 @@ BBOX_FORMAT_YXYX = "yxyx_norm1000"
 # Part of the dedup cache key; bump when the pipeline changes results (docs/jobs.md).
 # The default template below is covered by this version, since jobs that run a raw model
 # instead of a preset carry no profile version of their own.
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3  # 3: figure crops are persisted alongside the result
 
 # Transcription prompt for a rendered page. `{page}` is the real page number: the model is
 # told what to write so the placeholder it emits already matches our own numbering.

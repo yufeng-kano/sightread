@@ -28,7 +28,8 @@
  */
 import type { ComponentPublicInstance } from 'vue'
 import type { JobResult } from '~/lib/api'
-import { formatBbox, parseResultMarkdown } from '~/lib/markdown'
+import { cellGroupsToMarkdown, nodesToMarkdown, type OrphanListContext } from '~/lib/copy'
+import { formatBbox, parseResultMarkdown, type Bbox, type ResultBlock } from '~/lib/markdown'
 
 const props = withDefaults(
   defineProps<{
@@ -41,8 +42,10 @@ const props = withDefaults(
     pending?: boolean
     /** Why fetching the result failed, from the client. */
     errorMessage?: string | null
+    /** Where this caller's figure crops live (`…/figures`); null hides images entirely. */
+    figureBase?: string | null
   }>(),
-  { error: null, errorMessage: null },
+  { error: null, errorMessage: null, figureBase: null },
 )
 
 const emit = defineEmits<{ close: [] }>()
@@ -52,13 +55,23 @@ const { t } = useI18n()
 const tab = ref<'markdown' | 'json'>('markdown')
 const pages = computed(() => (props.result ? parseResultMarkdown(props.result.markdown) : []))
 
+/** A running job's snapshot: pages keep arriving under this one (docs/api.md § Partial). */
+const partial = computed(() => props.result?.meta.partial === true)
+
 /** Opens on the first page that has figures — the part of a result worth checking first —
  *  falling back to the first page when none do. The document jumps there too: selecting a
- *  page in the rail without moving the document would just be a lie about where you are. */
+ *  page in the rail without moving the document would just be a lie about where you are.
+ *  Once only: a partial result re-renders every poll, and re-jumping would yank the
+ *  document out from under whoever is already reading it. */
 const activePage = ref(0)
+let jumped = false
 watch(
   pages,
   async (list) => {
+    if (jumped || !list.length) {
+      return
+    }
+    jumped = true
     const first = (list.find((page) => page.figureCount > 0) ?? list[0])?.page ?? 0
     activePage.value = first
     if (!first) {
@@ -138,6 +151,149 @@ const meta = computed(() => {
   })
 })
 
+/** The live "x of y pages" line a partial result carries; empty once the job is done. */
+const progress = computed(() => {
+  const result = props.result
+  if (!result || !partial.value) {
+    return ''
+  }
+  const total = result.meta.page_count
+  const done = result.meta.pages_done ?? pages.value.length
+  return total ? t('viewer.parsing', { done, total }) : t('viewer.parsingSimple')
+})
+
+// --- figures ---------------------------------------------------------------
+
+/** Crops that answered 404 — old results, or a crop that failed — drawn as the dashed
+ *  placeholder instead of a broken image. */
+const failedCrops = reactive(new Set<string>())
+
+/** A partial result can expose a placeholder a beat before the worker has written its
+ *  crop (billing is persisted first, docs/parsing.md), so its request 404s. Each new
+ *  snapshot forgets past failures and retries — the image appears as soon as the file
+ *  exists, instead of staying hidden until the viewer is reopened. */
+watch(
+  () => props.result,
+  () => {
+    failedCrops.clear()
+  },
+)
+
+function figureKey(page: number, bbox: Bbox): string {
+  return `${page}/${bbox.join(',')}`
+}
+
+function figureUrl(page: number, bbox: Bbox): string {
+  return `${props.figureBase}/${figureKey(page, bbox)}`
+}
+
+/** The placeholder + caption this figure was rendered from — what a copy hands back. */
+function figureSource(page: number, block: ResultBlock & { kind: 'fig' }): string {
+  const placeholder = `![${block.id}](sightread://p${page}/${block.bbox.join(',')})`
+  return block.caption ? `${placeholder}\n${block.caption}` : placeholder
+}
+
+// --- copy as markdown ------------------------------------------------------
+
+/**
+ * What the cloned fragment can no longer say about a list selection: the clone drops the
+ * range's common ancestor, so an all-inside-one-list selection arrives as bare `li` runs.
+ * The live range still knows the list — its kind, and the number the first selected item
+ * carries — and hands both to the serializer.
+ */
+function orphanListContext(range: Range): OrphanListContext | undefined {
+  const container = range.commonAncestorContainer
+  const element = container instanceof Element ? container : container.parentElement
+  const list = element?.closest('.md-list')
+  if (!list) {
+    return undefined
+  }
+  if (list.tagName !== 'OL') {
+    return { ordered: false, start: 1 }
+  }
+  const start = Number.parseInt(list.getAttribute('start') ?? '1', 10) || 1
+  const startNode = range.startContainer
+  const startElement = startNode instanceof Element ? startNode : startNode.parentElement
+  const item = startElement?.closest('li')
+  const items = Array.from(list.children).filter((child) => child.tagName === 'LI')
+  const offset = item ? Math.max(0, items.indexOf(item)) : 0
+  return { ordered: true, start: start + offset }
+}
+
+/**
+ * Firefox reports a table-region selection as one range per selected cell. Serialized
+ * range by range that becomes a stack of one-cell tables, so when every range sits in a
+ * cell of the same table, the live cells are grouped by their row and serialized as the
+ * one table the user actually selected. Any other multi-range selection falls through to
+ * the per-range path.
+ */
+function tableRegionMarkdown(selection: Selection): string | null {
+  if (selection.rangeCount < 2) {
+    return null
+  }
+  const cells: Element[] = []
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const node = selection.getRangeAt(index).startContainer
+    const element = node instanceof Element ? node : node.parentElement
+    const cell = element?.closest('td, th')
+    if (!cell) {
+      return null
+    }
+    cells.push(cell)
+  }
+  const table = cells[0]?.closest('table')
+  if (!table || !cells.every((cell) => cell.closest('table') === table)) {
+    return null
+  }
+  // Ranges arrive in document order, so insertion order groups rows top to bottom.
+  const rows = new Map<Element, Element[]>()
+  for (const cell of cells) {
+    const row = cell.closest('tr')
+    if (!row) {
+      return null
+    }
+    const group = rows.get(row) ?? []
+    group.push(cell)
+    rows.set(row, group)
+  }
+  return cellGroupsToMarkdown([...rows.values()])
+}
+
+/** Ctrl+C inside the document copies markdown, tables included (docs/web.md). */
+function onCopy(event: ClipboardEvent) {
+  const selection = window.getSelection()
+  if (!selection || selection.isCollapsed || !event.clipboardData) {
+    return
+  }
+  const region = tableRegionMarkdown(selection)
+  const fragments: string[] = []
+  if (region) {
+    fragments.push(region)
+  } else {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index)
+      // A selection confined to a code or math block copies verbatim: the clone is a bare
+      // text node whose whitespace the serializer would collapse, and in a <pre> the line
+      // breaks and indentation are the content.
+      const container = range.commonAncestorContainer
+      const element = container instanceof Element ? container : container.parentElement
+      if (element?.closest('pre')) {
+        fragments.push(range.toString())
+        continue
+      }
+      const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
+      if (markdown) {
+        fragments.push(markdown)
+      }
+    }
+  }
+  if (!fragments.length) {
+    return
+  }
+  event.preventDefault()
+  event.clipboardData.setData('text/plain', fragments.join('\n'))
+}
+
 const json = computed(() => (props.result ? JSON.stringify(props.result, null, 2) : ''))
 
 /**
@@ -182,22 +338,32 @@ const failedPages = computed(() => props.result?.errors ?? [])
       <pre v-else-if="tab === 'json'" class="json mono">{{ json }}</pre>
 
       <UiEmptyState
-        v-else-if="!pages.length"
+        v-else-if="!pages.length && !partial"
         class="state"
         :title="t('viewer.empty')"
         :body="t('viewer.emptyBody')"
       />
 
-      <div v-else class="markdown" :class="{ degraded: failedPages.length > 0 }">
-        <!-- Spans both columns: it is a fact about the document, not about one page. -->
-        <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
-          {{
-            t('viewer.degraded', {
-              count: failedPages.length,
-              pages: failedPages.map((entry) => entry.page).join(', '),
-            })
-          }}
-        </UiBanner>
+      <div v-else class="markdown" :class="{ degraded: failedPages.length > 0 || partial }">
+        <!-- Spans both columns: facts about the whole document, not about one page. Both
+             can hold at once — a page can fail while the rest is still parsing, and the
+             failure must not silence the live progress. -->
+        <div v-if="failedPages.length || partial" class="doc-notes">
+          <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
+            {{
+              t('viewer.degraded', {
+                count: failedPages.length,
+                pages: failedPages.map((entry) => entry.page).join(', '),
+              })
+            }}
+          </UiBanner>
+          <!-- The parse is still running; pages below are what exists so far
+               (docs/api.md § Partial results). -->
+          <div v-if="partial" class="parsing-note">
+            <UiSpinner />
+            <span>{{ progress }}</span>
+          </div>
+        </div>
 
         <nav class="page-rail" :aria-label="t('viewer.pagesLabel')">
           <p class="eyebrow sm page-rail-label">{{ t('viewer.pagesLabel') }}</p>
@@ -217,7 +383,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
           </button>
         </nav>
 
-        <div ref="scroller" class="document" @scroll="onScroll">
+        <div ref="scroller" class="document" @scroll="onScroll" @copy="onCopy">
           <section
             v-for="page in pages"
             :key="page.page"
@@ -229,9 +395,13 @@ const failedPages = computed(() => props.result?.errors ?? [])
             </p>
             <article class="prose">
               <template v-for="(block, index) in page.blocks" :key="index">
-                <h3 v-if="block.kind === 'h2'" class="md-h2">{{ block.text }}</h3>
-                <h4 v-else-if="block.kind === 'h3'" class="md-h3">{{ block.text }}</h4>
-                <p v-else-if="block.kind === 'p'" class="md-p">{{ block.text }}</p>
+                <h3 v-if="block.kind === 'h2'" class="md-h2" :data-level="block.level">
+                  <MdInline :text="block.text" />
+                </h3>
+                <h4 v-else-if="block.kind === 'h3'" class="md-h3" :data-level="block.level">
+                  <MdInline :text="block.text" />
+                </h4>
+                <p v-else-if="block.kind === 'p'" class="md-p"><MdInline :text="block.text" /></p>
 
                 <!-- Whitespace preserved: the line breaks are the formula. -->
                 <pre v-else-if="block.kind === 'math'" class="md-math">{{ block.text }}</pre>
@@ -247,39 +417,59 @@ const failedPages = computed(() => props.result?.errors ?? [])
                   class="md-list"
                   :start="block.start"
                 >
-                  <li v-for="(item, itemIndex) in block.items" :key="itemIndex">{{ item }}</li>
+                  <li v-for="(item, itemIndex) in block.items" :key="itemIndex">
+                    <MdInline :text="item" />
+                  </li>
                 </component>
 
-                <table v-else-if="block.kind === 'table'" class="md-table">
-                  <thead>
-                    <tr>
-                      <th v-for="(cell, column) in block.header" :key="column" scope="col">
-                        {{ cell }}
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
-                      <td v-for="(cell, column) in row" :key="column">{{ cell }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+                <!-- Its own scroll axis: a table wider than the reading measure slides in
+                     place instead of stretching the page (docs/web.md § Result viewer). -->
+                <div v-else-if="block.kind === 'table'" class="md-table-wrap">
+                  <table class="md-table">
+                    <thead>
+                      <tr>
+                        <th v-for="(cell, column) in block.header" :key="column" scope="col">
+                          <MdInline :text="cell" />
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
+                        <td v-for="(cell, column) in row" :key="column">
+                          <MdInline :text="cell" />
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
 
-                <!-- The crop itself does not exist yet: the pipeline stores the bbox, not a
-                     cropped image (docs/web.md § Result viewer). The frame, the caption and
-                     the sizing are the ones an <img> will take when it does. -->
-                <figure v-else class="md-figure">
-                  <div class="figure-frame">
+                <!-- The stored crop when one exists; the dashed frame when it does not
+                     (old results, failed crop). `data-md` is what a copy hands back. -->
+                <figure v-else class="md-figure" :data-md="figureSource(page.page, block)">
+                  <img
+                    v-if="figureBase && !failedCrops.has(figureKey(page.page, block.bbox))"
+                    class="figure-image"
+                    :src="figureUrl(page.page, block.bbox)"
+                    :alt="block.caption || block.id"
+                    loading="lazy"
+                    @error="failedCrops.add(figureKey(page.page, block.bbox))"
+                  >
+                  <div v-else class="figure-frame">
                     <UiIcon name="scan-text" />
                     <span>{{ t('viewer.figurePending') }}</span>
                   </div>
                   <figcaption class="figure-caption mono">
-                    <span>{{ block.caption || block.id }}</span>
+                    <span><MdInline :text="block.caption || block.id" /></span>
                     <span>{{ formatBbox(block.bbox) }}</span>
                   </figcaption>
                 </figure>
               </template>
             </article>
+          </section>
+
+          <!-- Where the next page will land, while the parse is still running. -->
+          <section v-if="partial" class="page" aria-hidden="true">
+            <UiSkeleton class="page-skeleton" :rows="4" />
           </section>
         </div>
       </div>
@@ -383,10 +573,24 @@ const failedPages = computed(() => props.result?.errors ?? [])
   grid-template-rows: auto minmax(0, 1fr);
 }
 
-.degraded-note {
+.doc-notes {
   grid-column: 1 / -1;
+}
+
+.degraded-note {
   border-inline: none;
   border-top: none;
+}
+
+/* A fact about the whole document — it is still growing. */
+.parsing-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--text-xs);
 }
 
 .page-rail {
@@ -523,12 +727,28 @@ const failedPages = computed(() => props.result?.errors ?? [])
   margin-top: var(--space-2);
 }
 
+/* The table's own scroll axis: wider than the reading measure, it slides in place rather
+   than stretching the page — the prose column's width is fixed (docs/web.md). */
+.md-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
 .md-table {
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   font-size: var(--text-sm);
   font-variant-numeric: tabular-nums;
+}
+
+/* Long prose cells still wrap; the cap is what keeps one wordy cell from dragging the
+   whole table out to a single unreadable line. */
+.md-table th,
+.md-table td {
+  max-width: 36ch;
 }
 
 .md-table th {
@@ -554,6 +774,14 @@ const failedPages = computed(() => props.result?.errors ?? [])
 
 .md-figure {
   margin: 0;
+}
+
+/* The stored crop, at the width the prose gives it and never more. */
+.figure-image {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--line-soft);
+  background: var(--paper);
 }
 
 /* Dashed, because it is a frame around something that is not there yet. */
@@ -589,6 +817,23 @@ const failedPages = computed(() => props.result?.errors ?? [])
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Where the next page will land while the parse runs. */
+.page-skeleton {
+  max-width: 60ch;
+}
+
+/* Inline math keeps the body's colour; the serif face is what marks it as notation. */
+.prose :deep(.md-inline-math) {
+  font-family: var(--font-display);
+  font-style: italic;
+}
+
+.prose :deep(.md-inline-math sup),
+.prose :deep(.md-inline-math sub) {
+  font-style: normal;
+  line-height: 1;
 }
 
 /* --- JSON view ------------------------------------------------------------ */

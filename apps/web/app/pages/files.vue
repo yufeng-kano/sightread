@@ -309,32 +309,52 @@ const loadingResults = reactive(new Set<number>())
 /** The single upload whose result should open itself; `-1` while it has no id yet. */
 let autoPreviewFor: number | null = null
 
-async function showResult(document: LibraryDocument) {
-  openDocument.value = document
-  // Reading something by hand settles what the screen is for; a queued auto-preview must
-  // not take it away when it finishes.
-  autoPreviewFor = null
-  // A parse still running has no result to ask for, and a 404 cached now would be the
-  // answer the dialog kept showing after the pages landed. The watcher below fetches it
-  // the moment the poll says it exists.
-  if (isPending(document) || results.has(document.id) || loadingResults.has(document.id)) {
+/** One read of the document's result — the final one, or a running job's partial
+ *  snapshot (docs/api.md § Partial results). At most one request per document in flight. */
+async function fetchResult(document: LibraryDocument) {
+  if (loadingResults.has(document.id)) {
     return
   }
   loadingResults.add(document.id)
   resultErrors.delete(document.id)
+  let fetched: JobResult | null = null
   try {
-    results.set(document.id, await getDocumentResult(document.id))
+    fetched = await getDocumentResult(document.id)
+    results.set(document.id, fetched)
   } catch (error) {
     resultErrors.set(document.id, await resolve(error))
   } finally {
     loadingResults.delete(document.id)
   }
+  // The parse can finish while a partial request is in flight: the watcher's final fetch
+  // was swallowed by the in-flight guard, and with nothing left pending the poll has
+  // stopped — so nothing else will ask again. Recheck the row this response landed on.
+  // Only after a *successful partial* response: a failed request retrying here would be
+  // an unbounded loop against a route that answers the same error every time.
+  const row = documents.value.find((entry) => entry.id === document.id)
+  if (fetched?.meta.partial && row && !isPending(row)) {
+    void fetchResult(row)
+  }
+}
+
+async function showResult(document: LibraryDocument) {
+  openDocument.value = document
+  // Reading something by hand settles what the screen is for; a queued auto-preview must
+  // not take it away when it finishes.
+  autoPreviewFor = null
+  const held = results.get(document.id)
+  // A held final result is done; a held partial one is a stale snapshot — refetch it.
+  if (held && !held.meta.partial) {
+    return
+  }
+  await fetchResult(document)
 }
 
 /**
- * The open dialog follows its own row. A document opened while it was still parsing has to
- * pick up the result the moment one exists — otherwise the dialog sits on "nothing to show
- * yet" until it is closed and opened again, over a row the list already calls succeeded.
+ * The open dialog follows its own row. A document opened while it is still parsing
+ * re-reads its partial result on the same poll that advances the row's progress, so pages
+ * appear as they land — and the moment the poll says the job finished, the final result
+ * replaces the last snapshot (nothing partial is ever kept).
  */
 watch(documents, (list) => {
   const open = openDocument.value
@@ -346,9 +366,15 @@ watch(documents, (list) => {
     return
   }
   openDocument.value = fresh
-  if (!isPending(fresh) && !results.has(fresh.id) && !loadingResults.has(fresh.id)) {
-    resultErrors.delete(fresh.id)
-    void showResult(fresh)
+  const held = results.get(fresh.id)
+  // A failed fetch is not retried on every list change — reopening the document retries.
+  // The same guard covers a held partial over a terminal row (a failed job answers 404
+  // forever); a still-pending row retries freely, since each attempt clears the error.
+  const failed = resultErrors.has(fresh.id)
+  const missing = !held && !failed
+  const stalePartial = held?.meta.partial === true && !failed
+  if (isPending(fresh) || stalePartial || missing) {
+    void fetchResult(fresh)
   }
 })
 
@@ -1175,13 +1201,20 @@ function rowAttrs(row: Row): Record<string, unknown> {
       @cancel="deleting = null"
     />
 
+    <!-- Keyed per document so reopening on another file resets scroll and page state.
+         `pending` only while there is nothing to draw: a partial result is a document. -->
     <ResultViewer
       v-if="openDocument"
+      :key="openDocument.id"
       :title="openDocument.name"
       :error="openDocument.error"
       :result="results.get(openDocument.id) ?? null"
-      :pending="loadingResults.has(openDocument.id) || isPending(openDocument)"
+      :pending="
+        !results.has(openDocument.id) &&
+        (loadingResults.has(openDocument.id) || isPending(openDocument))
+      "
       :error-message="resultErrors.get(openDocument.id) ?? null"
+      :figure-base="`/api/library/documents/${openDocument.id}/figures`"
       @close="openDocument = null"
     />
   </UiScreen>

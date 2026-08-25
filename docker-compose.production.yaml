@@ -49,15 +49,26 @@ services:
     environment:
       APP_ENV: production
       UPLOAD_DIR: /data/uploads
+      FIGURES_DIR: /data/figures
     depends_on:
       pg:
         condition: service_healthy
     volumes:
       - uploads:/data/uploads
+      - figures:/data/figures
     # Migrations run once, from the api container, before it serves (docs/database.md).
     command: >
       sh -c "alembic upgrade head &&
       uvicorn sightread.main:app --host 0.0.0.0 --port 8000"
+    # Healthy only once /healthz answers — which is only after `alembic upgrade head`
+    # finished and uvicorn is serving. The worker gates on this, so it can never claim a
+    # queued job against a schema the migration has not written yet.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   worker:
     build:
@@ -68,13 +79,18 @@ services:
     environment:
       APP_ENV: production
       UPLOAD_DIR: /data/uploads
+      FIGURES_DIR: /data/figures
     depends_on:
       pg:
         condition: service_healthy
+      # service_healthy, not service_started: started only means the container exists,
+      # and a worker that claims a job mid-migration bills the user and then fails on
+      # the missing column.
       api:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - uploads:/data/uploads
+      - figures:/data/figures
     command: ["python", "-m", "sightread.worker"]
 
   web:
@@ -85,9 +101,11 @@ services:
       - api
 
   backup:
-    # Leaving a managed platform means backups are ours (docs/deployment.md). One dump a
-    # day into ./backups, keeping the newest seven. Deliberately a visible shell loop:
-    # a cron container would hide the schedule and the rotation in two more places.
+    # Leaving a managed platform means backups are ours (docs/deployment.md). One pass a
+    # day into ./backups — the database dump plus an archive of the stored figure crops,
+    # which are durable result data a restored database cannot recreate — keeping the
+    # newest seven of each. Deliberately a visible shell loop: a cron container would hide
+    # the schedule and the rotation in two more places.
     image: postgres:16
     restart: unless-stopped
     environment:
@@ -97,6 +115,7 @@ services:
       PGHOST: pg
     volumes:
       - ./backups:/backups
+      - figures:/data/figures:ro
     depends_on:
       pg:
         condition: service_healthy
@@ -106,15 +125,24 @@ services:
         set -eu
         while true; do
           stamp=$$(date -u +%Y%m%dT%H%M%SZ)
-          if pg_dump --format=custom --file="/backups/sightread-$$stamp.dump.tmp"; then
+          # The dump and the crops behind its results are one backup: both are written as
+          # temporaries and published together only when both succeeded, so the newest
+          # dump always has a same-stamp figures archive to restore beside it.
+          if pg_dump --format=custom --file="/backups/sightread-$$stamp.dump.tmp" &&
+            tar -czf "/backups/figures-$$stamp.tar.gz.tmp" -C /data figures; then
             mv "/backups/sightread-$$stamp.dump.tmp" "/backups/sightread-$$stamp.dump"
-            echo "backup: wrote sightread-$$stamp.dump"
+            mv "/backups/figures-$$stamp.tar.gz.tmp" "/backups/figures-$$stamp.tar.gz"
+            echo "backup: wrote sightread-$$stamp.dump + figures-$$stamp.tar.gz"
           else
-            rm -f "/backups/sightread-$$stamp.dump.tmp"
-            echo "backup: pg_dump failed at $$stamp" >&2
+            rm -f "/backups/sightread-$$stamp.dump.tmp" "/backups/figures-$$stamp.tar.gz.tmp"
+            echo "backup: failed at $$stamp, nothing published" >&2
           fi
-          # Keep the newest seven dumps; anything older is deleted.
+          # Keep the newest seven of each; anything older is deleted.
           ls -1t /backups/sightread-*.dump 2>/dev/null | tail -n +8 | while read -r old; do
+            rm -f "$$old"
+            echo "backup: rotated out $$old"
+          done
+          ls -1t /backups/figures-*.tar.gz 2>/dev/null | tail -n +8 | while read -r old; do
             rm -f "$$old"
             echo "backup: rotated out $$old"
           done
@@ -124,5 +152,6 @@ services:
 volumes:
   pgdata:
   uploads:
+  figures:
   caddy_data:
   caddy_config:

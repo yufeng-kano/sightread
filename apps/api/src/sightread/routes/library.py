@@ -15,8 +15,10 @@ from __future__ import annotations
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, delete, select
 from sqlalchemy.exc import IntegrityError
@@ -24,7 +26,7 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from ..auth.deps import AppSettings, CsrfGuard, DbSession, SessionUser
-from ..db.models import Document, Folder, Job, Result
+from ..db.models import Document, Folder, Job, JobPage, Result
 from ..errors import ApiError
 from ..jobs.intake import (
     MULTIPART_ENVELOPE_BYTES,
@@ -32,7 +34,8 @@ from ..jobs.intake import (
     submit_parse,
     upload_chunks,
 )
-from ..jobs.runner import result_payload
+from ..jobs.runner import partial_result_payload, result_payload
+from ..parsing.figures import crop_path, parse_bbox_path
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 
@@ -542,9 +545,66 @@ async def delete_document(document_id: int, user: SessionUser, db: DbSession) ->
 @router.get("/documents/{document_id}/result")
 async def document_result(document_id: int, user: SessionUser, db: DbSession):
     row = await owned_document(db, user.id, document_id)
+    # The job before the result, deliberately: under READ COMMITTED each statement gets its
+    # own snapshot, so read the other way a job finishing between the two reads answers
+    # "no result" + "succeeded" — a 404 for a result that now exists. This way the same
+    # race reads "running" and answers a partial instead, which the next poll replaces.
+    job = await job_of(db, row.job_id)
     result = (
         await db.execute(select(Result).where(Result.job_id == row.job_id))
     ).scalar_one_or_none()
-    if result is None:
+    if result is not None:
+        return result_payload(result)
+    return await partial_result(db, job)
+
+
+async def partial_result(db: DbSession, job: Job) -> dict:
+    """A still-running job's finished pages, or the 404 a job without any result earns.
+
+    Control plane only — the data plane stays 404 until the job finishes
+    (docs/api.md § Partial results).
+    """
+    if job.status not in ("queued", "running"):
         raise ApiError(404, "invalid_request", "This job has no result yet")
-    return result_payload(result)
+    rows = (
+        (
+            await db.execute(
+                select(JobPage).where(JobPage.job_id == job.id).order_by(JobPage.page_no)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return partial_result_payload(job, list(rows))
+
+
+def figure_crop_response(settings: AppSettings, job: Job, page: int, bbox: str) -> FileResponse:
+    """One stored crop, addressed the way its placeholder addresses it, or 404.
+
+    The bbox is parsed and re-cleaned into the canonical filename, so the path on disk is
+    built from four bounded integers — never from request text.
+    """
+    cleaned = parse_bbox_path(bbox)
+    if cleaned is None or page < 1:
+        raise ApiError(404, "invalid_request", "No such figure")
+    path = crop_path(Path(settings.figures_dir), job.id, page, cleaned)
+    if not path.is_file():
+        raise ApiError(404, "invalid_request", "No crop is stored for this figure")
+    # Never cached: browser caches key on the URL, not the session, so a cached crop
+    # would outlive a sign-out and answer the next account in the same browser profile.
+    return FileResponse(
+        path, media_type="image/png", headers={"Cache-Control": "private, no-store"}
+    )
+
+
+@router.get("/documents/{document_id}/figures/{page}/{bbox}")
+async def document_figure(
+    document_id: int,
+    page: int,
+    bbox: str,
+    user: SessionUser,
+    db: DbSession,
+    settings: AppSettings,
+):
+    row = await owned_document(db, user.id, document_id)
+    return figure_crop_response(settings, await job_of(db, row.job_id), page, bbox)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..config import Settings
 from ..db.models import Job, JobPage, Result, UsageLog, utcnow
 from ..parsing import poppler
+from ..parsing.figures import discard_job_figures, save_page_figures
 from ..parsing.images import ImageError, normalize_image
 from ..parsing.markdown import PageMarkdown, assemble
 from ..parsing.profiles import transcription_prompt_template
@@ -110,6 +112,16 @@ class RunState:
     # UPSTREAM_RESPONSE_MAX_BYTES, carried here so page tasks need no Settings.
     max_response_bytes: int = 33_554_432
     payment_failures: int = 0
+    # This job's own directory under FIGURES_DIR; None turns crop persistence off
+    # (docs/parsing.md § Figure crops).
+    figures_dir: Path | None = None
+    # FIGURES_PER_PAGE_MAX — the crop cap one page may spend (docs/parsing.md).
+    figures_per_page: int = 40
+    # Crop threads cannot be cancelled from the event loop, so writing and discarding
+    # serialize on this guard; once `figures_discarded` is set, a late crop thread writes
+    # nothing and cannot recreate a directory the cleanup just removed.
+    figures_guard: threading.Lock = field(default_factory=threading.Lock)
+    figures_discarded: bool = False
 
 
 def result_payload(result: Result) -> dict:
@@ -120,6 +132,44 @@ def result_payload(result: Result) -> dict:
         "figures": result.figures,
         "errors": result.errors,
         "meta": result.meta,
+    }
+
+
+def partial_result_payload(job: Job, rows: list[JobPage]) -> dict:
+    """A running job's finished pages, in the result's own shape (docs/api.md § Partial).
+
+    The stored per-page markdown goes through the same `assemble` the final result gets —
+    markers, renumbered placeholders, cleaned boxes. Figure ids are per-snapshot: a page
+    finishing out of order renumbers them, which is why nothing may cache this payload.
+    `pages` carries only what is known so far — no page dimensions, which only the final
+    outcome holds.
+    """
+    # `is not None`, not truthiness: a blank page stores "" with no error, and it must
+    # count as finished here exactly as it does in the final assembly (which drops empty
+    # bodies itself either way).
+    finished = [row for row in rows if not row.error and row.markdown is not None]
+    document = assemble(
+        [PageMarkdown(page=row.page_no, markdown=row.markdown or "") for row in finished]
+    )
+    return {
+        "markdown": document.markdown,
+        "pages": [
+            {"page": row.page_no, "method": row.method, "error": row.error} for row in rows
+        ],
+        "figures": document.figures,
+        "errors": [{"page": row.page_no, "reason": row.error} for row in rows if row.error],
+        "meta": {
+            "job_id": str(job.id),
+            "model": job.model,
+            "profile": job.profile,
+            "bbox_format": job.bbox_format,
+            "pipeline_version": job.pipeline_version,
+            "sha256": job.sha256,
+            "cached": False,
+            "partial": True,
+            "page_count": job.page_count,
+            "pages_done": job.pages_done,
+        },
     }
 
 
@@ -188,6 +238,7 @@ async def _process_pdf_page(
     source: Path,
     work_dir: Path,
     render_slots: asyncio.Semaphore,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> PageOutcome:
     size = info.page_size(page_no)
     outcome = PageOutcome(
@@ -201,6 +252,7 @@ async def _process_pdf_page(
         # The Poppler detail is diagnostic (its stderr), never document content.
         logger.warning("job %s page %d render failed: %s", job.id, page_no, exc)
         outcome.error = "render failed"
+        await _record_page(sessionmaker, job, outcome)
         return outcome
 
     try:
@@ -219,6 +271,12 @@ async def _process_pdf_page(
         )
         if transcription is not None:
             outcome.markdown = transcription.markdown
+        # Billing before the optional raster work: a SIGTERM landing mid-crop cancels this
+        # task, and the requeued reparse bills the page again — the call that already ran
+        # must be in `usage_log` first.
+        await _record_page(sessionmaker, job, outcome)
+        if transcription is not None:
+            await _save_figures(state, outcome.markdown, image, page_no)
     finally:
         # The rendered page has served its purpose; nothing may outlive the call.
         image.unlink(missing_ok=True)
@@ -226,12 +284,21 @@ async def _process_pdf_page(
 
 
 async def _process_image(
-    job: Job, state: RunState, connection: Connection, source: Path, work_dir: Path
+    job: Job,
+    state: RunState,
+    connection: Connection,
+    source: Path,
+    work_dir: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> PageOutcome:
     try:
         normalized = normalize_image(source, work_dir)
     except ImageError:
-        return PageOutcome(page=1, width_pt=0, height_pt=0, error="the image could not be decoded")
+        outcome = PageOutcome(
+            page=1, width_pt=0, height_pt=0, error="the image could not be decoded"
+        )
+        await _record_page(sessionmaker, job, outcome)
+        return outcome
 
     outcome = PageOutcome(
         page=1,
@@ -255,9 +322,47 @@ async def _process_image(
         )
         if transcription is not None:
             outcome.markdown = transcription.markdown
+        # Same ordering as the PDF path: the billed call is persisted before crop work.
+        await _record_page(sessionmaker, job, outcome)
+        if transcription is not None:
+            await _save_figures(state, outcome.markdown, normalized.path, 1)
     finally:
         normalized.path.unlink(missing_ok=True)
     return outcome
+
+
+def _locked_save_figures(state: RunState, markdown: str, image: Path, page_no: int) -> None:
+    """Thread body: crop under the guard, unless this job's figures were discarded."""
+    with state.figures_guard:
+        if state.figures_discarded or state.figures_dir is None:
+            return
+        save_page_figures(markdown, image, page_no, state.figures_dir, state.figures_per_page)
+
+
+async def _save_figures(state: RunState, markdown: str, image: Path, page_no: int) -> None:
+    """Persist the page's figure crops before retention deletes its render.
+
+    Pillow work runs off the event loop; the fan-out must not stall behind an image
+    decode. The guard it runs under is what lets `_discard_figures` wait it out.
+    """
+    if state.figures_dir is None:
+        return
+    await asyncio.to_thread(_locked_save_figures, state, markdown, image, page_no)
+
+
+def _discard_figures(state: RunState) -> None:
+    """Drop an abandoned attempt's crops, waiting out any in-flight crop thread.
+
+    Synchronous on purpose: it runs from `run_job`'s outermost finally, which executes
+    even under cancellation — where a fresh await could be interrupted again. Taking the
+    guard means a crop thread mid-write finishes first, and the discard flag means one
+    that has not started yet writes nothing (docs/parsing.md § Figure crops).
+    """
+    if state.figures_dir is None:
+        return
+    with state.figures_guard:
+        state.figures_discarded = True
+        shutil.rmtree(state.figures_dir, ignore_errors=True)
 
 
 async def _record_page(
@@ -272,6 +377,8 @@ async def _record_page(
                 method=outcome.method,
                 status="failed" if outcome.error else "succeeded",
                 error=outcome.error,
+                # What the partial result reads while the job runs (docs/jobs.md).
+                markdown=outcome.markdown if not outcome.error else None,
             )
         )
         for usage in outcome.usage:
@@ -298,7 +405,11 @@ async def _finish(
     error: str | None = None,
     result: dict | None = None,
 ) -> None:
-    """Write the terminal state and delete the source document (docs/jobs.md § Retention)."""
+    """Write the terminal state and delete the source document (docs/jobs.md § Retention).
+
+    A failed job's crop directory goes too — `run_job`'s outermost finally discards it
+    (through the crop guard), so a late crop thread cannot write it back.
+    """
     async with sessionmaker() as db:
         job = await db.get(Job, job_id)
         if job is None:
@@ -347,12 +458,16 @@ async def run_job(
             job.connection_base_url = connection.base_url
             await db.commit()
 
+    figures_root = Path(settings.figures_dir)
+
     if connection is None:
         error = (
             "no OpenRouter key stored"
             if job.connection_id is None
             else "the provider connection for this job no longer exists"
         )
+        # No crop thread ever started for this run; a plain discard covers leftovers.
+        discard_job_figures(figures_root, job_id)
         await _finish(sessionmaker, job_id, status="failed", error=error)
         return
 
@@ -362,82 +477,106 @@ async def run_job(
     state = RunState(
         budget=VisionBudget(settings.vision_concurrency_per_job),
         max_response_bytes=settings.upstream_response_max_bytes,
+        figures_dir=figures_root / str(job.id),
+        figures_per_page=settings.figures_per_page_max,
     )
 
+    succeeded = False
     try:
-        outcomes = await _process_job(
-            job, state, connection, source, work_dir, render_slots, sessionmaker
-        )
-    except JobAborted as exc:
-        await _finish(sessionmaker, job_id, status="failed", error=str(exc))
-        return
-    except (poppler.PopplerError, ImageError, ValueError):
-        await _finish(sessionmaker, job_id, status="failed", error="the document is unreadable")
-        return
-    except Exception:
-        # A worker must not die on one job. The traceback goes to the log; the job row
-        # carries no internals and no document content.
-        logger.exception("job %s failed unexpectedly", job_id)
-        await _finish(sessionmaker, job_id, status="failed", error="internal error")
-        return
-    finally:
-        shutil.rmtree(work_dir, ignore_errors=True)
+        try:
+            outcomes = await _process_job(
+                job, state, connection, source, work_dir, render_slots, sessionmaker
+            )
+        except JobAborted as exc:
+            await _finish(sessionmaker, job_id, status="failed", error=str(exc))
+            return
+        except (poppler.PopplerError, ImageError, ValueError):
+            await _finish(
+                sessionmaker, job_id, status="failed", error="the document is unreadable"
+            )
+            return
+        except Exception:
+            # A worker must not die on one job. The traceback goes to the log; the job row
+            # carries no internals and no document content.
+            logger.exception("job %s failed unexpectedly", job_id)
+            await _finish(sessionmaker, job_id, status="failed", error="internal error")
+            return
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
 
-    if all(outcome.error for outcome in outcomes):
-        # Partial markdown from a document nothing could read is worse than nothing, but
-        # the caller still deserves to know what killed each page.
-        reasons = "; ".join(f"page {o.page}: {o.error}" for o in outcomes[:5])
-        if len(outcomes) > 5:
-            reasons += "; …"
+        if all(outcome.error for outcome in outcomes):
+            # Partial markdown from a document nothing could read is worse than nothing,
+            # but the caller still deserves to know what killed each page.
+            reasons = "; ".join(f"page {o.page}: {o.error}" for o in outcomes[:5])
+            if len(outcomes) > 5:
+                reasons += "; …"
+            await _finish(
+                sessionmaker,
+                job_id,
+                status="failed",
+                error=f"no page could be parsed ({reasons})",
+            )
+            return
+
+        document = assemble(
+            [
+                PageMarkdown(page=outcome.page, markdown=outcome.markdown)
+                for outcome in outcomes
+                if not outcome.error
+            ]
+        )
+        if document.dropped_figures:
+            # A count only: how badly the chosen model follows the coordinate contract is
+            # worth knowing, what it said about the document is not.
+            logger.info(
+                "job %s dropped %d unusable figure boxes", job_id, document.dropped_figures
+            )
+        # Set before the commit below, deliberately: a SIGTERM can land after PostgreSQL
+        # has durably committed the result but before this coroutine resumes, and a
+        # committed result must keep its crops. The trade is the right way round — if the
+        # commit itself failed, the crops leak (bounded, harmless) instead of a succeeded
+        # job losing its images.
+        succeeded = True
         await _finish(
-            sessionmaker, job_id, status="failed", error=f"no page could be parsed ({reasons})"
-        )
-        return
-
-    document = assemble(
-        [
-            PageMarkdown(page=outcome.page, markdown=outcome.markdown)
-            for outcome in outcomes
-            if not outcome.error
-        ]
-    )
-    if document.dropped_figures:
-        # A count only: how badly the chosen model follows the coordinate contract is worth
-        # knowing, what it said about the document is not.
-        logger.info("job %s dropped %d unusable figure boxes", job_id, document.dropped_figures)
-    await _finish(
-        sessionmaker,
-        job_id,
-        status="succeeded",
-        result={
-            "markdown": document.markdown,
-            "pages": [
-                {
-                    "page": outcome.page,
-                    "width_pt": round(outcome.width_pt, 2),
-                    "height_pt": round(outcome.height_pt, 2),
-                    "method": outcome.method,
-                    "error": outcome.error,
-                }
-                for outcome in outcomes
-            ],
-            "figures": document.figures,
-            "errors": [
-                {"page": outcome.page, "reason": outcome.error}
-                for outcome in outcomes
-                if outcome.error
-            ],
-            "meta": {
-                "job_id": str(job.id),
-                "model": job.model,
-                "profile": job.profile,
-                "bbox_format": job.bbox_format,
-                "pipeline_version": job.pipeline_version,
-                "sha256": job.sha256,
-                "cached": False,
+            sessionmaker,
+            job_id,
+            status="succeeded",
+            result={
+                "markdown": document.markdown,
+                "pages": [
+                    {
+                        "page": outcome.page,
+                        "width_pt": round(outcome.width_pt, 2),
+                        "height_pt": round(outcome.height_pt, 2),
+                        "method": outcome.method,
+                        "error": outcome.error,
+                    }
+                    for outcome in outcomes
+                ],
+                "figures": document.figures,
+                "errors": [
+                    {"page": outcome.page, "reason": outcome.error}
+                    for outcome in outcomes
+                    if outcome.error
+                ],
+                "meta": {
+                    "job_id": str(job.id),
+                    "model": job.model,
+                    "profile": job.profile,
+                    "bbox_format": job.bbox_format,
+                    "pipeline_version": job.pipeline_version,
+                    "sha256": job.sha256,
+                    "cached": False,
+                },
             },
-        },
-    )
+        )
+    finally:
+        if not succeeded:
+            # Whatever ended this run without a result — a failure above, or the worker
+            # cancelling on shutdown — takes the attempt's crops with it (docs/jobs.md
+            # § Retention). Runs even under cancellation, and waits out any crop thread
+            # still writing before removing the directory.
+            _discard_figures(state)
 
 
 async def _process_job(
@@ -449,11 +588,9 @@ async def _process_job(
     render_slots: asyncio.Semaphore,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> list[PageOutcome]:
-    """Fan the job's pages out and record each as it finishes."""
+    """Fan the job's pages out; each page records itself the moment its billed call ran."""
     if job.kind == "image":
-        outcome = await _process_image(job, state, connection, source, work_dir)
-        await _record_page(sessionmaker, job, outcome)
-        return [outcome]
+        return [await _process_image(job, state, connection, source, work_dir, sessionmaker)]
 
     info = await poppler.pdf_info(source, cwd=work_dir)
     page_numbers = parse_pages_spec(job.pages_spec, info.page_count)
@@ -461,11 +598,9 @@ async def _process_job(
     outcomes: dict[int, PageOutcome] = {}
 
     async def process(page_no: int) -> None:
-        outcome = await _process_pdf_page(
-            job, state, connection, info, page_no, source, work_dir, render_slots
+        outcomes[page_no] = await _process_pdf_page(
+            job, state, connection, info, page_no, source, work_dir, render_slots, sessionmaker
         )
-        outcomes[page_no] = outcome
-        await _record_page(sessionmaker, job, outcome)
 
     try:
         async with asyncio.TaskGroup() as group:

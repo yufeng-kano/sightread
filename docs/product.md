@@ -13,7 +13,7 @@ The origin spec (v0.1) is a reference, not a contract. Decisions that supersede 
 3. **No `file path` source.** Hosted service accepts uploads (multipart) or base64 only — server paths would be an LFI.
 4. **Model is user-chosen.** Users pick any image-input model from OpenRouter; preset **profiles** bundle tested model + coordinate prompt + parser. Off-profile models are allowed and flagged untested — bbox quality is the user's responsibility ([parsing.md](./parsing.md)).
 5. **bbox format is declared per response** (`bbox_format` field), not assumed globally.
-6. **No server-side cropping.** The service parses and returns; cropping is the receiver's job. The response carries everything needed (page dims, bbox format, method, model).
+6. **Coordinates are the contract; crops are a stored extra.** The response carries everything an API caller needs to crop for themselves (page dims, bbox format, method, model) and the data plane still ships no image bytes — but the pipeline now also saves each figure's crop from the page it already rendered, so the web result viewer can show real figures ([parsing.md](./parsing.md) § Figure crops). Crop delivery is a control-plane read for the viewer, not part of `/v1/*`.
 7. **Poppler, not PyMuPDF.** PyMuPDF is AGPL; Poppler is used via subprocess (crash isolation for free). This repo is MIT-licensed open source.
 
 ## Tenants and trust model

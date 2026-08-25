@@ -52,7 +52,11 @@ jobs             id UUID PK, user_id FK, kind pdf|image, filename, media_type,
                  INDEX (user_id, sha256, model, connection_id, profile, profile_version,
                         pages_spec, prompt_sha256, pipeline_version)
                         WHERE status='succeeded'                             -- dedup
-job_pages        (job_id FK, page_no) PK, method NULL, status, error NULL
+job_pages        (job_id FK, page_no) PK, method NULL, status, error NULL,
+                 markdown TEXT NULL               -- the page's transcription, written as
+                                                  -- the page finishes; what the partial
+                                                  -- result reads (jobs.md § Progress);
+                                                  -- NULL on failed pages
 results          job_id PK/FK, markdown TEXT, pages JSONB, figures JSONB,
                  errors JSONB, meta JSONB, created_at
 folders          id PK, user_id FK, parent_id FK folders NULL, name,
