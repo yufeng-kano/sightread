@@ -52,6 +52,11 @@ function inlineText(node: MarkdownNode): string {
   if (tex !== null) {
     return tex
   }
+  // Rendered emphasis, code and <br> carry their exact markdown source (docs/web.md).
+  const src = attribute(node, 'data-src')
+  if (src !== null) {
+    return src
+  }
   return children(node).map(inlineText).join('')
 }
 

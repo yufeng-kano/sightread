@@ -12,9 +12,9 @@
  * code, display math and figure placeholders (docs/parsing.md § Prompt). Anything else stays
  * a paragraph, which renders as its own source text rather than disappearing.
  *
- * It is also flat, and knowingly so: a nested list comes out as one level, inline emphasis
- * comes out as its source characters, and a fence is closed by any fence rather than by a
- * matching one — so a `~~~` block containing a literal ``` line ends early. The content
+ * It is also flat, and knowingly so: a nested list comes out as one level, and a fence is
+ * closed by any fence rather than by a matching one — so a `~~~` block containing a
+ * literal ``` line ends early. The content
  * survives, the structure does not. The alternative is not a deeper version of this — it is
  * rendering through a real GFM parser, which is a dependency and a sanitisation decision
  * (docs/web.md § Result viewer).
@@ -311,152 +311,132 @@ export function formatBbox(bbox: Bbox): string {
   return `[${bbox.join(',')}]`
 }
 
-// --- inline math ------------------------------------------------------------------------
+// --- inline content --------------------------------------------------------------------
 //
 // Transcriptions carry inline TeX the way papers do — `Qingwen Bu$^{1,2}$`, `H$_2$O` — and
-// showing the source characters makes an author line read like a syntax error. This is
-// affiliation-marker-grade math, not a TeX engine: superscripts, subscripts, the
-// `\text`-family wrappers and a short symbol table. Anything unrecognized keeps its source
-// characters, and display math stays a verbatim block (docs/web.md § Result viewer).
-
-/** One run inside a rendered math span: plain, superscript or subscript. */
-export interface MathToken {
-  kind: 'text' | 'sup' | 'sub'
-  text: string
-}
+// inline markdown the way tables do — `**96.5**`, `UniVLA<br>(Ours)` — and showing either
+// as source characters makes the document read like a syntax error. `$…$` spans are split
+// out here and typeset by KaTeX at render time (docs/web.md § Result viewer); the text
+// between them is parsed for strong/em, inline code and `<br>` line breaks. Each styled
+// segment keeps its exact source (`tex`, `src`), which is what copy-as-markdown reads back.
 
 export type InlineSegment =
   | { kind: 'text'; text: string }
   /** `tex` is the source between the dollars, verbatim — copy-as-markdown reads it back. */
-  | { kind: 'math'; tex: string; tokens: MathToken[] }
-
-/** Wrappers whose braces mean "typeset this normally" — the content is kept, the command
- *  dropped. `operatorname` is the odd one out but appears in transcriptions. */
-const TEXT_WRAPPERS = new Set(['text', 'textrm', 'textit', 'textbf', 'mathrm', 'mathbf', 'mathit', 'mathsf', 'mathcal', 'operatorname'])
-
-/** The symbols vision transcriptions actually produce. Unknown commands stay verbatim —
- *  a wrong glyph is worse than visible TeX. */
-const MATH_SYMBOLS: Record<string, string> = {
-  alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', varepsilon: 'ε',
-  zeta: 'ζ', eta: 'η', theta: 'θ', iota: 'ι', kappa: 'κ', lambda: 'λ', mu: 'μ',
-  nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ', sigma: 'σ', tau: 'τ', upsilon: 'υ',
-  phi: 'φ', varphi: 'φ', chi: 'χ', psi: 'ψ', omega: 'ω',
-  Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π', Sigma: 'Σ',
-  Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
-  times: '×', cdot: '·', pm: '±', mp: '∓', div: '÷', leq: '≤', le: '≤', geq: '≥',
-  ge: '≥', neq: '≠', ne: '≠', approx: '≈', sim: '~', propto: '∝', infty: '∞',
-  rightarrow: '→', to: '→', leftarrow: '←', leftrightarrow: '↔', Rightarrow: '⇒',
-  degree: '°', circ: '∘', bullet: '•', star: '★', dagger: '†', ddagger: '‡',
-  ldots: '…', dots: '…', cdots: '⋯', prime: '′', partial: '∂', nabla: '∇',
-  sum: 'Σ', prod: 'Π', int: '∫', sqrt: '√', in: '∈', notin: '∉', subset: '⊂',
-  cup: '∪', cap: '∩', forall: '∀', exists: '∃', emptyset: '∅', angle: '∠',
-  percent: '%', '%': '%', '&': '&', '#': '#', _: '_', '{': '{', '}': '}', '$': '$',
-  ',': ' ', ';': ' ', quad: ' ', qquad: ' ',
-}
-
-/** `{…}` balanced from `start` (which must point at the `{`), else the single char or
- *  `\command` there. Returns the argument's content and the index just past it. */
-function readArgument(tex: string, start: number): [string, number] {
-  if (tex[start] === '{') {
-    let depth = 0
-    for (let index = start; index < tex.length; index += 1) {
-      if (tex[index] === '{') depth += 1
-      if (tex[index] === '}') {
-        depth -= 1
-        if (depth === 0) {
-          return [tex.slice(start + 1, index), index + 1]
-        }
-      }
-    }
-    // Unbalanced: everything to the end is the argument, which at least loses nothing.
-    return [tex.slice(start + 1), tex.length]
-  }
-  if (tex[start] === '\\') {
-    const match = /^\\[a-zA-Z]+/.exec(tex.slice(start))
-    if (match) {
-      return [match[0], start + match[0].length]
-    }
-    return [tex.slice(start, start + 2), start + 2]
-  }
-  return [tex[start] ?? '', start + 1]
-}
-
-function pushToken(out: MathToken[], kind: MathToken['kind'], text: string) {
-  if (!text) {
-    return
-  }
-  const last = out[out.length - 1]
-  if (last && last.kind === kind) {
-    last.text += text
-  } else {
-    out.push({ kind, text })
-  }
-}
-
-/** Flattens one TeX run into renderable tokens. Scripts inside scripts flatten to the
- *  outer kind — `x^{y^z}` is beyond what this reader promises to draw. */
-function tokenizeMath(tex: string, kind: MathToken['kind'], out: MathToken[]): void {
-  let index = 0
-  while (index < tex.length) {
-    const char = tex[index] ?? ''
-    if ((char === '^' || char === '_') && kind === 'text') {
-      const [argument, next] = readArgument(tex, index + 1)
-      tokenizeMath(argument, char === '^' ? 'sup' : 'sub', out)
-      index = next
-      continue
-    }
-    if (char === '\\') {
-      const [command, next] = readArgument(tex, index)
-      const name = command.slice(1)
-      if (TEXT_WRAPPERS.has(name) && tex[next] === '{') {
-        const [argument, past] = readArgument(tex, next)
-        tokenizeMath(argument, kind, out)
-        index = past
-      } else if (name in MATH_SYMBOLS) {
-        pushToken(out, kind, MATH_SYMBOLS[name] ?? '')
-        index = next
-      } else {
-        // Unknown command: keep it readable as source — including its braced arguments'
-        // delimiters, or `\frac{a}{b}` collapses into `\fracab`.
-        pushToken(out, kind, command)
-        let cursor = next
-        while (tex[cursor] === '{') {
-          const [argument, past] = readArgument(tex, cursor)
-          pushToken(out, kind, '{')
-          tokenizeMath(argument, kind, out)
-          pushToken(out, kind, '}')
-          cursor = past
-        }
-        index = cursor
-      }
-      continue
-    }
-    if (char === '{' || char === '}') {
-      index += 1
-      continue
-    }
-    pushToken(out, kind, char)
-    index += 1
-  }
-}
+  | { kind: 'math'; tex: string }
+  | { kind: 'strong'; segments: InlineSegment[]; src: string }
+  | { kind: 'em'; segments: InlineSegment[]; src: string }
+  | { kind: 'code'; text: string; src: string }
+  | { kind: 'br'; src: string }
 
 /** A `$…$` span anchored at one candidate opener: closes on `$` not followed by a digit —
  *  so "$5 and $6" stays two prices, not a formula. */
 const MATH_SPAN_AT = /^\$([^$\n]+)\$(?!\d)/
 
+/** `<br>` in a table cell is a line break, not text — the one HTML tag transcriptions use. */
+const BR_AT = /^<br\s*\/?>/i
+
+/** An inline code span. Single backticks only — a fenced block never reaches this parser. */
+const CODE_AT = /^`([^`\n]+)`/
+
+// Emphasis opens on a marker followed by non-space and closes on non-space + marker, per
+// GFM's flanking idea reduced to what transcriptions produce. The asterisk forms allow
+// inner single `*`/`_` so `**a*b**` survives; the underscore forms additionally require a
+// non-word character on both outsides, so `usage_log` and `a_b_c` stay text.
+const STRONG_AST_AT = /^\*\*(?!\s)((?:[^*\n]|\*(?!\*))+?)(?<=\S)\*\*/
+const EM_AST_AT = /^\*(?![\s*])([^*\n]+?)(?<=\S)\*(?!\*)/
+const STRONG_UND_AT = /^__(?!\s)((?:[^_\n]|_(?!_))+?)(?<=\S)__(?![0-9A-Za-z_])/
+const EM_UND_AT = /^_(?![\s_])([^_\n]+?)(?<=\S)_(?![0-9A-Za-z_])/
+
+/**
+ * Parses the styled-inline shapes — emphasis, code, `<br>` — inside one math-free run of
+ * text. Recursive for nesting (`_**Abstract**_` is an `em` holding a `strong`); anything
+ * that fails a marker's rules stays literal text, which is also the wrong-guess fallback:
+ * visible markers beat text silently bolded.
+ */
+function parseStyled(text: string): InlineSegment[] {
+  const segments: InlineSegment[] = []
+  let cursor = 0
+  let scan = 0
+
+  function flushText(end: number): void {
+    if (end > cursor) {
+      segments.push({ kind: 'text', text: text.slice(cursor, end) })
+    }
+  }
+
+  function push(segment: InlineSegment, length: number): void {
+    flushText(scan)
+    segments.push(segment)
+    cursor = scan + length
+    scan = cursor
+  }
+
+  while (scan < text.length) {
+    const char = text[scan]
+    if (char !== '*' && char !== '_' && char !== '`' && char !== '<') {
+      scan += 1
+      continue
+    }
+    const rest = text.slice(scan)
+    if (char === '<') {
+      const br = BR_AT.exec(rest)
+      if (br) {
+        push({ kind: 'br', src: br[0] }, br[0].length)
+        continue
+      }
+      scan += 1
+      continue
+    }
+    if (char === '`') {
+      const code = CODE_AT.exec(rest)
+      if (code) {
+        push({ kind: 'code', text: code[1] ?? '', src: code[0] }, code[0].length)
+        continue
+      }
+      scan += 1
+      continue
+    }
+    // Underscores open emphasis only off a word: mid-identifier they are identifier.
+    const wordBefore = scan > 0 && /[0-9A-Za-z_]/.test(text[scan - 1] ?? '')
+    const strong = char === '*' ? STRONG_AST_AT.exec(rest) : wordBefore ? null : STRONG_UND_AT.exec(rest)
+    if (strong) {
+      push({ kind: 'strong', segments: parseStyled(strong[1] ?? ''), src: strong[0] }, strong[0].length)
+      continue
+    }
+    const em = char === '*' ? EM_AST_AT.exec(rest) : wordBefore ? null : EM_UND_AT.exec(rest)
+    if (em) {
+      push({ kind: 'em', segments: parseStyled(em[1] ?? ''), src: em[0] }, em[0].length)
+      continue
+    }
+    scan += 1
+  }
+  flushText(text.length)
+  return segments
+}
+
 /**
  * Splits one line of prose (a paragraph, heading, list item, table cell or caption) into
- * plain text and rendered math spans.
+ * plain text, math spans and styled-inline segments.
  *
- * Scanned dollar by dollar rather than with one global regex on purpose: a rejected
- * candidate (a price, a span padded with spaces) resumes just past its *opening* dollar —
- * a global match would have consumed the next span's opener as its own closer, so
- * "cost $5 and variable $x$" would lose the real formula.
+ * Math is split first, and scanned dollar by dollar rather than with one global regex on
+ * purpose: a rejected candidate (a price, a span padded with spaces) resumes just past its
+ * *opening* dollar — a global match would have consumed the next span's opener as its own
+ * closer, so "cost $5 and variable $x$" would lose the real formula. Splitting math first
+ * also keeps `$a_{1}$` out of the underscore-emphasis rules; the cost is that emphasis
+ * *around* a math span stays source characters, which is the rarer shape.
  */
 export function parseInline(text: string): InlineSegment[] {
   const segments: InlineSegment[] = []
   let cursor = 0
   let scan = 0
+
+  function flushStyled(end: number): void {
+    if (end > cursor) {
+      segments.push(...parseStyled(text.slice(cursor, end)))
+    }
+  }
+
   while (scan < text.length) {
     const open = text.indexOf('$', scan)
     if (open === -1) {
@@ -468,17 +448,14 @@ export function parseInline(text: string): InlineSegment[] {
       scan = open + 1
       continue
     }
-    if (open > cursor) {
-      segments.push({ kind: 'text', text: text.slice(cursor, open) })
-    }
-    const tokens: MathToken[] = []
-    tokenizeMath(tex, 'text', tokens)
-    segments.push({ kind: 'math', tex, tokens })
+    flushStyled(open)
+    segments.push({ kind: 'math', tex })
     cursor = open + match[0].length
     scan = cursor
   }
-  if (cursor < text.length || segments.length === 0) {
-    segments.push({ kind: 'text', text: text.slice(cursor) })
+  flushStyled(text.length)
+  if (segments.length === 0) {
+    segments.push({ kind: 'text', text: '' })
   }
   return segments
 }

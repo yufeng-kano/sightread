@@ -18,7 +18,7 @@ BBOX_FORMAT_YXYX = "yxyx_norm1000"
 # Part of the dedup cache key; bump when the pipeline changes results (docs/jobs.md).
 # The default template below is covered by this version, since jobs that run a raw model
 # instead of a preset carry no profile version of their own.
-PIPELINE_VERSION = 3  # 3: figure crops are persisted alongside the result
+PIPELINE_VERSION = 4  # 4: figure boxes bound the graphic only, captions excluded
 
 # Transcription prompt for a rendered page. `{page}` is the real page number: the model is
 # told what to write so the placeholder it emits already matches our own numbering.
@@ -31,7 +31,10 @@ Where a figure, chart, photograph, diagram or map appears, emit a line of the fo
 at that position, with the figure's caption verbatim on the very next line (an empty line
 when it has none). YMIN, XMIN, YMAX and XMAX are integers in the {bbox_format} coordinate
 space: [ymin, xmin, ymax, xmax] normalized to 0-1000, origin at the top-left corner of
-this page image. Emit no other Markdown images.
+this page image. The box must tightly bound the graphic itself — the plotted area, drawing
+or photograph — and must exclude the figure's caption or title and any surrounding body
+text: the caption is the text on the next line, never part of the box. Emit no other
+Markdown images.
 """
 
 
@@ -81,7 +84,8 @@ PRESET_PROFILES: tuple[Profile, ...] = (
         bbox_format=BBOX_FORMAT_YXYX,
         prompt_template=DEFAULT_PROMPT_TEMPLATE,
         # 2: the phase-1 placeholder wording was replaced by the shipped prompt above.
-        profile_version=2,
+        # 3: figure boxes bound the graphic only, captions excluded.
+        profile_version=3,
         model_pattern=re.compile(r"^google/gemini[\w.-]*flash"),
         excluded_terms=("lite", "thinking", "-exp"),
     ),
@@ -94,7 +98,8 @@ PRESET_PROFILES: tuple[Profile, ...] = (
         ),
         bbox_format=BBOX_FORMAT_YXYX,
         prompt_template=DEFAULT_PROMPT_TEMPLATE,
-        profile_version=1,
+        # 2: figure boxes bound the graphic only, captions excluded.
+        profile_version=2,
         model_pattern=re.compile(r"^qwen/qwen[\w.-]*-vl"),
         excluded_terms=("thinking",),
     ),

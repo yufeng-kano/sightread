@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBbox, parseInline, parseResultMarkdown, type MathToken } from './markdown'
+import { formatBbox, parseInline, parseResultMarkdown } from './markdown'
 
 describe('parseResultMarkdown', () => {
   it('splits on page markers and keeps block order', () => {
@@ -291,50 +291,14 @@ describe('parseResultMarkdown code and numbering', () => {
 })
 
 describe('parseInline', () => {
-  it('renders affiliation superscripts as script tokens', () => {
+  it('splits affiliation superscripts into math spans', () => {
     const segments = parseInline('Qingwen Bu$^{1,2}$, Yanting Yang$^2$')
 
     expect(segments).toEqual([
       { kind: 'text', text: 'Qingwen Bu' },
-      { kind: 'math', tex: '^{1,2}', tokens: [{ kind: 'sup', text: '1,2' }] },
+      { kind: 'math', tex: '^{1,2}' },
       { kind: 'text', text: ', Yanting Yang' },
-      { kind: 'math', tex: '^2', tokens: [{ kind: 'sup', text: '2' }] },
-    ])
-  })
-
-  it('handles subscripts, wrappers and symbols inside one span', () => {
-    const segments = parseInline('water is $H_2O$ at $\\text{25}\\degree$C')
-
-    expect(segments[1]).toEqual({
-      kind: 'math',
-      tex: 'H_2O',
-      tokens: [
-        { kind: 'text', text: 'H' },
-        { kind: 'sub', text: '2' },
-        { kind: 'text', text: 'O' },
-      ],
-    })
-    expect(segments[3]).toEqual({
-      kind: 'math',
-      tex: '\\text{25}\\degree',
-      tokens: [{ kind: 'text', text: '25°' }],
-    })
-  })
-
-  it('keeps an unknown command as its source characters', () => {
-    const segments = parseInline('$\\frobnicate{x}$')
-
-    expect(segments[0]!.kind).toBe('math')
-    expect((segments[0] as { tokens: MathToken[] }).tokens).toEqual([
-      { kind: 'text', text: '\\frobnicate{x}' },
-    ])
-  })
-
-  it('keeps the braces of an unsupported command with several arguments', () => {
-    const segments = parseInline('$\\frac{a}{b}$')
-
-    expect((segments[0] as { tokens: MathToken[] }).tokens).toEqual([
-      { kind: 'text', text: '\\frac{a}{b}' },
+      { kind: 'math', tex: '^2' },
     ])
   })
 
@@ -349,12 +313,80 @@ describe('parseInline', () => {
 
     expect(segments).toEqual([
       { kind: 'text', text: 'cost $5 and variable ' },
-      { kind: 'math', tex: 'x', tokens: [{ kind: 'text', text: 'x' }] },
+      { kind: 'math', tex: 'x' },
     ])
   })
 
   it('hands plain text through as one segment', () => {
     expect(parseInline('no math here')).toEqual([{ kind: 'text', text: 'no math here' }])
     expect(parseInline('')).toEqual([{ kind: 'text', text: '' }])
+  })
+
+  it('renders strong emphasis with its source kept for copy', () => {
+    expect(parseInline('**96.5**')).toEqual([
+      { kind: 'strong', segments: [{ kind: 'text', text: '96.5' }], src: '**96.5**' },
+    ])
+  })
+
+  it('renders <br> as a line break inside a table cell', () => {
+    expect(parseInline('UniVLA<br>(Ours)')).toEqual([
+      { kind: 'text', text: 'UniVLA' },
+      { kind: 'br', src: '<br>' },
+      { kind: 'text', text: '(Ours)' },
+    ])
+  })
+
+  it('nests emphasis one inside the other', () => {
+    expect(parseInline('_**Abstract**_')).toEqual([
+      {
+        kind: 'em',
+        segments: [
+          { kind: 'strong', segments: [{ kind: 'text', text: 'Abstract' }], src: '**Abstract**' },
+        ],
+        src: '_**Abstract**_',
+      },
+    ])
+  })
+
+  it('keeps mid-word underscores as text', () => {
+    expect(parseInline('usage_log and a_b_c stay text')).toEqual([
+      { kind: 'text', text: 'usage_log and a_b_c stay text' },
+    ])
+  })
+
+  it('renders single-asterisk emphasis', () => {
+    expect(parseInline('*A. Main Results*')).toEqual([
+      { kind: 'em', segments: [{ kind: 'text', text: 'A. Main Results' }], src: '*A. Main Results*' },
+    ])
+  })
+
+  it('closes each emphasis span at its own marker', () => {
+    expect(parseInline('**a** and **b**')).toEqual([
+      { kind: 'strong', segments: [{ kind: 'text', text: 'a' }], src: '**a**' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'strong', segments: [{ kind: 'text', text: 'b' }], src: '**b**' },
+    ])
+  })
+
+  it('renders an inline code span verbatim', () => {
+    expect(parseInline('run `uv sync` first')).toEqual([
+      { kind: 'text', text: 'run ' },
+      { kind: 'code', text: 'uv sync', src: '`uv sync`' },
+      { kind: 'text', text: ' first' },
+    ])
+  })
+
+  it('leaves unpaired markers as literal text', () => {
+    expect(parseInline('5 * 3 and a ** that never closes')).toEqual([
+      { kind: 'text', text: '5 * 3 and a ** that never closes' },
+    ])
+  })
+
+  it('keeps underscores inside a math span out of emphasis', () => {
+    expect(parseInline('$a_{1}$ and $b_{2}$')).toEqual([
+      { kind: 'math', tex: 'a_{1}' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'math', tex: 'b_{2}' },
+    ])
   })
 })

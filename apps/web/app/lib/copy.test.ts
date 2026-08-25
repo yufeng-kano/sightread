@@ -176,3 +176,27 @@ describe('cellGroupsToMarkdown', () => {
     )
   })
 })
+
+describe('rendered inline markdown', () => {
+  it('hands back emphasis, code and <br> from data-src', () => {
+    const cell = el('td', {}, [
+      el('strong', { 'data-src': '**96.5**' }, [text('96.5')]),
+      text(' '),
+      el('br', { 'data-src': '<br>' }),
+      el('code', { class: 'md-inline-code', 'data-src': '`uv sync`' }, [text('uv sync')]),
+    ])
+    const row = el('tr', {}, [cell])
+
+    expect(nodesToMarkdown([el('table', {}, [row])])).toBe(
+      ['| **96.5** <br>`uv sync` |', '| --- |'].join('\n'),
+    )
+  })
+
+  it('hands back a KaTeX display block from its data-md', () => {
+    const block = el('div', { class: 'md-math-block', 'data-md': '$$\nx = 1\n$$' }, [
+      text('x=1'),
+    ])
+
+    expect(nodesToMarkdown([block])).toBe('$$\nx = 1\n$$')
+  })
+})

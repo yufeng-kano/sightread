@@ -403,8 +403,9 @@ const failedPages = computed(() => props.result?.errors ?? [])
                 </h4>
                 <p v-else-if="block.kind === 'p'" class="md-p"><MdInline :text="block.text" /></p>
 
-                <!-- Whitespace preserved: the line breaks are the formula. -->
-                <pre v-else-if="block.kind === 'math'" class="md-math">{{ block.text }}</pre>
+                <!-- KaTeX-typeset, falling back to the verbatim source when it cannot
+                     parse (docs/web.md § Result viewer). -->
+                <MdMath v-else-if="block.kind === 'math'" :tex="block.text" />
 
                 <pre
                   v-else-if="block.kind === 'code'"
@@ -657,7 +658,11 @@ const failedPages = computed(() => props.result?.errors ?? [])
   padding: 0 var(--space-10) var(--space-12);
 }
 
+/* The reading measure is the page, centered in the pane — on a wide dialog the text sits
+   in the middle rather than hugging the rail (docs/web.md § Result viewer). */
 .page {
+  max-width: 60ch;
+  margin-inline: auto;
   padding: var(--space-7) 0 var(--space-1);
   border-top: 1px solid var(--line);
 }
@@ -824,16 +829,18 @@ const failedPages = computed(() => props.result?.errors ?? [])
   max-width: 60ch;
 }
 
-/* Inline math keeps the body's colour; the serif face is what marks it as notation. */
-.prose :deep(.md-inline-math) {
-  font-family: var(--font-display);
-  font-style: italic;
+/* KaTeX brings its own faces and sizing; the span only needs to not fight the line. */
+.prose :deep(.md-inline-math .katex) {
+  font-size: 1.06em;
 }
 
-.prose :deep(.md-inline-math sup),
-.prose :deep(.md-inline-math sub) {
-  font-style: normal;
-  line-height: 1;
+/* An inline code span: the mono face on the sunken surface, sized to sit in the line. */
+.prose :deep(.md-inline-code) {
+  padding: 1px var(--space-1);
+  border-radius: var(--radius);
+  background: var(--paper-sunken);
+  font-family: var(--mono);
+  font-size: 0.9em;
 }
 
 /* --- JSON view ------------------------------------------------------------ */
