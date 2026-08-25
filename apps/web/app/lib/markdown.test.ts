@@ -441,6 +441,31 @@ describe('parseInline', () => {
     ])
   })
 
+  it('does not let a marker inside nested code close the emphasis', () => {
+    expect(parseInline('*use `a*b` now*')).toEqual([
+      {
+        kind: 'em',
+        segments: [
+          { kind: 'text', text: 'use ' },
+          { kind: 'code', text: 'a*b', src: '`a*b`' },
+          { kind: 'text', text: ' now' },
+        ],
+        src: '*use `a*b` now*',
+      },
+    ])
+    expect(parseInline('**use `a**b` now**')).toEqual([
+      {
+        kind: 'strong',
+        segments: [
+          { kind: 'text', text: 'use ' },
+          { kind: 'code', text: 'a**b', src: '`a**b`' },
+          { kind: 'text', text: ' now' },
+        ],
+        src: '**use `a**b` now**',
+      },
+    ])
+  })
+
   it('keeps dollars inside a code span as code, not math', () => {
     expect(parseInline('write `$x$` literally')).toEqual([
       { kind: 'text', text: 'write ' },

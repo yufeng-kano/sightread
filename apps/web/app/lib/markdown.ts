@@ -345,17 +345,20 @@ const CODE_AT = /^`([^`\n]+)`/
 // non-word character on both outsides — word in the Unicode sense, so `usage_log`,
 // `café_value` and `測試_變數` all stay text.
 // A backslash-escaped closer is a literal character, so it cannot close a span either
-// (the `(?<!\\)` on each closing marker).
+// (the `(?<!\\)` on each closing marker). Every interior admits a complete `` `code` ``
+// span as one unit (the leading alternative in each group), so a delimiter *inside* code
+// — `*use \`a*b\` now*` — cannot close the emphasis around it, mirroring how the math
+// scan protects code spans.
 const WORD_CHAR = /[\p{L}\p{N}_]/u
 /** `***text***` is em(strong(text)) — matched before the pair forms, which would
  *  otherwise close two asterisks early and strand the third. */
-const TRIPLE_AST_AT = /^\*\*\*(?![\s*])([^*\n]+?)(?<=\S)(?<!\\)\*\*\*(?!\*)/
-const STRONG_AST_AT = /^\*\*(?!\s)((?:[^*\n]|\*(?!\*))+?)(?<=\S)(?<!\\)\*\*/
+const TRIPLE_AST_AT = /^\*\*\*(?![\s*])((?:`[^`\n]*`|[^*\n])+?)(?<=\S)(?<!\\)\*\*\*(?!\*)/
+const STRONG_AST_AT = /^\*\*(?!\s)((?:`[^`\n]*`|[^*\n]|\*(?!\*))+?)(?<=\S)(?<!\\)\*\*/
 /** An em's interior admits `**` pairs — `*outer **inner** text*` nests — but never a
- *  single `*`, which would be indistinguishable from its own closer. */
-const EM_AST_AT = /^\*(?![\s*])((?:[^*\n]|\*\*(?!\*))+?)(?<=\S)(?<!\\)\*(?!\*)/
-const STRONG_UND_AT = /^__(?!\s)((?:[^_\n]|_(?!_))+?)(?<=\S)(?<!\\)__(?![\p{L}\p{N}_])/u
-const EM_UND_AT = /^_(?![\s_])([^_\n]+?)(?<=\S)(?<!\\)_(?![\p{L}\p{N}_])/u
+ *  bare single `*`, which would be indistinguishable from its own closer. */
+const EM_AST_AT = /^\*(?![\s*])((?:`[^`\n]*`|[^*\n]|\*\*(?!\*))+?)(?<=\S)(?<!\\)\*(?!\*)/
+const STRONG_UND_AT = /^__(?!\s)((?:`[^`\n]*`|[^_\n]|_(?!_))+?)(?<=\S)(?<!\\)__(?![\p{L}\p{N}_])/u
+const EM_UND_AT = /^_(?![\s_])((?:`[^`\n]*`|[^_\n])+?)(?<=\S)(?<!\\)_(?![\p{L}\p{N}_])/u
 
 /**
  * Parses the styled-inline shapes — emphasis, code, `<br>` — inside one math-free run of
