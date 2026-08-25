@@ -876,13 +876,15 @@ const failedPages = computed(() => props.result?.errors ?? [])
   font-size: 1.06em;
 }
 
-/* An inline code span: the mono face on the sunken surface, sized to sit in the line. */
+/* An inline code span: the mono face on the sunken surface, sized to sit in the line.
+   `pre-wrap`, because its spaces are content — `a  b` must read as it copies. */
 .prose :deep(.md-inline-code) {
   padding: 1px var(--space-1);
   border-radius: var(--radius);
   background: var(--paper-sunken);
   font-family: var(--mono);
   font-size: 0.9em;
+  white-space: pre-wrap;
 }
 
 /* --- JSON view ------------------------------------------------------------ */

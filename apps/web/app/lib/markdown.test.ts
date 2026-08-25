@@ -477,6 +477,12 @@ describe('parseInline', () => {
     ])
   })
 
+  it('lets a self-escaped backslash precede a live closer', () => {
+    expect(parseInline('*path\\\\*')).toEqual([
+      { kind: 'em', segments: [{ kind: 'text', text: 'path\\\\' }], src: '*path\\\\*' },
+    ])
+  })
+
   it('keeps dollars inside a code span as code, not math', () => {
     expect(parseInline('write `$x$` literally')).toEqual([
       { kind: 'text', text: 'write ' },
