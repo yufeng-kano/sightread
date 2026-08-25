@@ -382,6 +382,25 @@ describe('parseInline', () => {
     ])
   })
 
+  it('treats non-ASCII letters as word characters around underscores', () => {
+    expect(parseInline('caf\u00e9_value_name and \u6e2c\u8a66_\u8b8a\u6578_\u540d\u7a31 stay text')).toEqual([
+      { kind: 'text', text: 'caf\u00e9_value_name and \u6e2c\u8a66_\u8b8a\u6578_\u540d\u7a31 stay text' },
+    ])
+  })
+
+  it('still opens underscore emphasis off punctuation and spaces', () => {
+    expect(parseInline('a _b_ c')).toEqual([
+      { kind: 'text', text: 'a ' },
+      { kind: 'em', segments: [{ kind: 'text', text: 'b' }], src: '_b_' },
+      { kind: 'text', text: ' c' },
+    ])
+  })
+
+  it('leaves backslash-escaped markers literal', () => {
+    expect(parseInline('\\*literal\\*')).toEqual([{ kind: 'text', text: '\\*literal\\*' }])
+    expect(parseInline('*a\\*')).toEqual([{ kind: 'text', text: '*a\\*' }])
+  })
+
   it('keeps dollars inside a code span as code, not math', () => {
     expect(parseInline('write `$x$` literally')).toEqual([
       { kind: 'text', text: 'write ' },

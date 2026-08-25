@@ -216,3 +216,24 @@ describe('partially selected styled elements', () => {
     expect(nodesToMarkdown([el('p', { class: 'md-p' }, [empty, text('after')])])).toBe('after')
   })
 })
+
+describe('display math cut by a selection boundary', () => {
+  const source = '$$\nx = 1\n$$'
+
+  function mathBlock() {
+    return el('div', { class: 'md-math-block', 'data-md': source }, [
+      el('span', { class: 'katex' }, [
+        el('span', { class: 'katex-mathml' }, [text('x=1 mathml mirror')]),
+        el('span', { class: 'katex-html' }, [text('= 1')]),
+      ]),
+    ])
+  }
+
+  it('copies only the surviving glyph text when the block is named partial', () => {
+    expect(nodesToMarkdown([mathBlock()], undefined, new Set([source]))).toBe('= 1')
+  })
+
+  it('still hands back the full source when the block was swallowed whole', () => {
+    expect(nodesToMarkdown([mathBlock()])).toBe(source)
+  })
+})

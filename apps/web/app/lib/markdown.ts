@@ -342,11 +342,15 @@ const CODE_AT = /^`([^`\n]+)`/
 // Emphasis opens on a marker followed by non-space and closes on non-space + marker, per
 // GFM's flanking idea reduced to what transcriptions produce. The asterisk forms allow
 // inner single `*`/`_` so `**a*b**` survives; the underscore forms additionally require a
-// non-word character on both outsides, so `usage_log` and `a_b_c` stay text.
-const STRONG_AST_AT = /^\*\*(?!\s)((?:[^*\n]|\*(?!\*))+?)(?<=\S)\*\*/
-const EM_AST_AT = /^\*(?![\s*])([^*\n]+?)(?<=\S)\*(?!\*)/
-const STRONG_UND_AT = /^__(?!\s)((?:[^_\n]|_(?!_))+?)(?<=\S)__(?![0-9A-Za-z_])/
-const EM_UND_AT = /^_(?![\s_])([^_\n]+?)(?<=\S)_(?![0-9A-Za-z_])/
+// non-word character on both outsides — word in the Unicode sense, so `usage_log`,
+// `café_value` and `測試_變數` all stay text.
+// A backslash-escaped closer is a literal character, so it cannot close a span either
+// (the `(?<!\\)` on each closing marker).
+const WORD_CHAR = /[\p{L}\p{N}_]/u
+const STRONG_AST_AT = /^\*\*(?!\s)((?:[^*\n]|\*(?!\*))+?)(?<=\S)(?<!\\)\*\*/
+const EM_AST_AT = /^\*(?![\s*])([^*\n]+?)(?<=\S)(?<!\\)\*(?!\*)/
+const STRONG_UND_AT = /^__(?!\s)((?:[^_\n]|_(?!_))+?)(?<=\S)(?<!\\)__(?![\p{L}\p{N}_])/u
+const EM_UND_AT = /^_(?![\s_])([^_\n]+?)(?<=\S)(?<!\\)_(?![\p{L}\p{N}_])/u
 
 /**
  * Parses the styled-inline shapes — emphasis, code, `<br>` — inside one math-free run of
@@ -378,6 +382,13 @@ function parseStyled(text: string): InlineSegment[] {
       scan += 1
       continue
     }
+    // A backslash-escaped marker is that literal character, never a delimiter — GFM's
+    // `\*literal\*` must not open emphasis. The backslash stays visible, like every
+    // other shape this parser declines to interpret.
+    if (text[scan - 1] === '\\') {
+      scan += 1
+      continue
+    }
     const rest = text.slice(scan)
     if (char === '<') {
       const br = BR_AT.exec(rest)
@@ -397,8 +408,9 @@ function parseStyled(text: string): InlineSegment[] {
       scan += 1
       continue
     }
-    // Underscores open emphasis only off a word: mid-identifier they are identifier.
-    const wordBefore = scan > 0 && /[0-9A-Za-z_]/.test(text[scan - 1] ?? '')
+    // Underscores open emphasis only off a word: mid-identifier they are identifier —
+    // in any script, so `café_value` and `測試_變數` stay text (\p{L}, not [A-Za-z]).
+    const wordBefore = scan > 0 && WORD_CHAR.test(text[scan - 1] ?? '')
     const strong = char === '*' ? STRONG_AST_AT.exec(rest) : wordBefore ? null : STRONG_UND_AT.exec(rest)
     if (strong) {
       push({ kind: 'strong', segments: parseStyled(strong[1] ?? ''), src: strong[0] }, strong[0].length)

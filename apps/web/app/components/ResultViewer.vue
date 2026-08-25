@@ -259,12 +259,35 @@ function tableRegionMarkdown(selection: Selection): string | null {
   return cellGroupsToMarkdown([...rows.values()])
 }
 
+/**
+ * Display-math blocks a selection boundary sits inside. `cloneContents` keeps such a
+ * block's element — and its full `data-md` — over truncated KaTeX children, so the
+ * serializer must not trust the source for these blocks and copies their surviving glyph
+ * text instead. A block the selection swallowed whole leaves both boundaries outside it
+ * and is not collected here.
+ */
+function partialMathSources(selection: Selection): Set<string> {
+  const partial = new Set<string>()
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index)
+    for (const container of [range.startContainer, range.endContainer]) {
+      const element = container instanceof Element ? container : container.parentElement
+      const source = element?.closest('.md-math-block')?.getAttribute('data-md')
+      if (source) {
+        partial.add(source)
+      }
+    }
+  }
+  return partial
+}
+
 /** Ctrl+C inside the document copies markdown, tables included (docs/web.md). */
 function onCopy(event: ClipboardEvent) {
   const selection = window.getSelection()
   if (!selection || selection.isCollapsed || !event.clipboardData) {
     return
   }
+  const partialMath = partialMathSources(selection)
   const region = tableRegionMarkdown(selection)
   const fragments: string[] = []
   if (region) {
@@ -281,7 +304,11 @@ function onCopy(event: ClipboardEvent) {
         fragments.push(range.toString())
         continue
       }
-      const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
+      const markdown = nodesToMarkdown(
+        range.cloneContents().childNodes,
+        orphanListContext(range),
+        partialMath,
+      )
       if (markdown) {
         fragments.push(markdown)
       }

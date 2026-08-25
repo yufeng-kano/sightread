@@ -167,10 +167,37 @@ function codeToMarkdown(node: MarkdownNode): string {
   return `$$\n${node.textContent ?? ''}\n$$`
 }
 
+/** A KaTeX clone's visible glyph text — the `.katex-html` layer when present, so the
+ *  invisible MathML mirror does not double every character into the copy. */
+function renderedMathText(node: MarkdownNode): string {
+  const html = findByClass(node, 'katex-html')
+  return (((html ?? node).textContent ?? '')).replace(/\s+/g, ' ').trim()
+}
+
+function findByClass(node: MarkdownNode, name: string): MarkdownNode | null {
+  if (node.nodeType === ELEMENT_NODE && classes(node).includes(name)) {
+    return node
+  }
+  for (const child of children(node)) {
+    const found = findByClass(child, name)
+    if (found) {
+      return found
+    }
+  }
+  return null
+}
+
 /** One block element's markdown, or null to fall through to its children. */
-function blockToMarkdown(node: MarkdownNode): string | null {
+function blockToMarkdown(node: MarkdownNode, partialSources?: ReadonlySet<string>): string | null {
   const source = attribute(node, 'data-md')
   if (source !== null) {
+    // A display-math block a selection boundary sits inside arrives as its element —
+    // full `data-md` over truncated KaTeX children — and handing back the source would
+    // claim formula content outside the selection. The caller names those blocks from
+    // the live selection; for them the glyph text that survived the clone is the copy.
+    if (partialSources?.has(source)) {
+      return renderedMathText(node)
+    }
     return source
   }
   const names = classes(node)
@@ -216,6 +243,8 @@ function isInline(node: MarkdownNode): boolean {
 interface Walk {
   blocks: string[]
   inline: string[]
+  /** `data-md` sources of display-math blocks a live selection boundary cut through. */
+  partialSources?: ReadonlySet<string>
 }
 
 function flush(walk: Walk): void {
@@ -327,7 +356,7 @@ function walkNode(node: MarkdownNode, walk: Walk): void {
   if (node.nodeType !== ELEMENT_NODE) {
     return
   }
-  const block = blockToMarkdown(node)
+  const block = blockToMarkdown(node, walk.partialSources)
   if (block !== null) {
     flush(walk)
     if (block) {
@@ -347,9 +376,16 @@ function walkNode(node: MarkdownNode, walk: Walk): void {
  * source a markdown editor will re-render — including a selection whose table or list
  * root the range clone left behind. `list` is that lost root's context, when the caller
  * could read it off the live selection — it only affects top-level orphaned `li` runs.
+ * `partialSources` names the display-math blocks a selection boundary sits inside (again
+ * read off the live selection): their `data-md` would claim unselected formula content,
+ * so they copy as the glyph text the clone actually carries.
  */
-export function nodesToMarkdown(nodes: ArrayLike<MarkdownNode>, list?: OrphanListContext): string {
-  const walk: Walk = { blocks: [], inline: [] }
+export function nodesToMarkdown(
+  nodes: ArrayLike<MarkdownNode>,
+  list?: OrphanListContext,
+  partialSources?: ReadonlySet<string>,
+): string {
+  const walk: Walk = { blocks: [], inline: [], partialSources }
   walkNodes(Array.from(nodes), walk, list)
   flush(walk)
   return walk.blocks.join('\n\n')
