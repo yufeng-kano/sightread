@@ -87,3 +87,17 @@ def test_discard_removes_only_that_jobs_crops(tmp_path) -> None:
     assert (tmp_path / str(kept) / "p1_0_0_10_10.png").is_file()
     # A job with no crops is a no-op, not an error.
     discard_job_figures(tmp_path, uuid.uuid4())
+
+
+def test_the_per_page_cap_keeps_the_first_boxes_in_reading_order(tmp_path) -> None:
+    image = _page_image(tmp_path / "page.png")
+    markdown = "\n".join(
+        f"![fig](sightread://p1/{y},0,{y + 50},100)" for y in range(0, 500, 50)
+    )
+
+    saved = save_page_figures(markdown, image, 1, tmp_path / "job", limit=3)
+
+    assert saved == 3
+    assert (tmp_path / "job" / "p1_0_0_50_100.png").is_file()
+    assert (tmp_path / "job" / "p1_100_0_150_100.png").is_file()
+    assert not (tmp_path / "job" / "p1_150_0_200_100.png").exists()

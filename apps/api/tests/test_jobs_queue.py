@@ -231,3 +231,24 @@ def test_sweeper_removes_only_stale_entries(tmp_path) -> None:
     assert fresh.exists()
     assert not stale.exists()
     assert not stale_dir.exists()
+
+
+def test_a_discarded_jobs_figures_cannot_be_written_back(tmp_path) -> None:
+    """The crop guard: after `_discard_figures`, a late crop thread writes nothing
+    (docs/parsing.md § Figure crops)."""
+    from PIL import Image
+
+    from sightread.jobs.runner import RunState, VisionBudget, _discard_figures, _locked_save_figures
+
+    image = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), (10, 10, 10)).save(image, format="PNG")
+    state = RunState(budget=VisionBudget(1), figures_dir=tmp_path / "job")
+
+    _locked_save_figures(state, "![fig](sightread://p1/0,0,500,500)", image, 1)
+    assert (tmp_path / "job" / "p1_0_0_500_500.png").is_file()
+
+    _discard_figures(state)
+    assert not (tmp_path / "job").exists()
+
+    _locked_save_figures(state, "![fig](sightread://p1/0,0,500,500)", image, 1)
+    assert not (tmp_path / "job").exists()

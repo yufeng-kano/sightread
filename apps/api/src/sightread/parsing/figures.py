@@ -59,14 +59,29 @@ def discard_job_figures(figures_dir: Path, job_id: uuid.UUID) -> None:
     shutil.rmtree(figures_dir / str(job_id), ignore_errors=True)
 
 
-def save_page_figures(markdown: str, image_path: Path, page: int, job_dir: Path) -> int:
+DEFAULT_FIGURES_PER_PAGE = 40
+
+
+def save_page_figures(
+    markdown: str,
+    image_path: Path,
+    page: int,
+    job_dir: Path,
+    limit: int = DEFAULT_FIGURES_PER_PAGE,
+) -> int:
     """Crop every placeholder on one transcribed page from its rendered image.
 
     `page` is our page number, not the model's — the same renumbering `assemble` applies,
     so the stored name matches the placeholder the result will carry. Returns how many
     crops were written; failures are logged and never raised.
+
+    At most `limit` distinct boxes, in reading order (FIGURES_PER_PAGE_MAX): the upstream
+    response body is capped, but a malicious user-defined endpoint could otherwise turn
+    one response into unbounded PNG encodes and durable disk.
     """
-    boxes: set[Bbox] = set()
+    boxes: list[Bbox] = []
+    seen: set[Bbox] = set()
+    truncated = False
     for match in PLACEHOLDER_RE.finditer(markdown):
         bbox = clean_bbox(
             (
@@ -76,8 +91,15 @@ def save_page_figures(markdown: str, image_path: Path, page: int, job_dir: Path)
                 int(match.group("xmax")),
             )
         )
-        if bbox is not None:
-            boxes.add(bbox)
+        if bbox is None or bbox in seen:
+            continue
+        if len(boxes) >= max(0, limit):
+            truncated = True
+            break
+        seen.add(bbox)
+        boxes.append(bbox)
+    if truncated:
+        logger.warning("page %d exceeded the per-page figure crop cap (%d)", page, limit)
     if not boxes:
         return 0
 

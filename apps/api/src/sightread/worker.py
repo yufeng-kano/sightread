@@ -74,8 +74,9 @@ async def run_worker(stop: asyncio.Event) -> None:
                 await asyncio.gather(running, return_exceptions=True)
                 async with sessionmaker() as db:
                     await requeue_job(db, job_id)
-                # The reparse starts from scratch, so the crops of the abandoned attempt
-                # go with the rest of its partial progress (docs/jobs.md § Retention).
+                # Backstop only: `run_job`'s own finally already discarded this attempt's
+                # crops, waiting out any crop thread under the guard — by the time the
+                # cancelled task has been gathered above, nothing can write them back.
                 discard_job_figures(Path(settings.figures_dir), job_id)
                 logger.info("requeued job %s on shutdown", job_id)
     finally:

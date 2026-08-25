@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # Stored figure crops, kept with the result — outside the upload dir on purpose, so the
     # sweeper never touches them (docs/parsing.md § Figure crops).
     figures_dir: str = "/data/figures"
+    # Cap on crops per page: a malicious user-defined upstream must not turn one response
+    # into unbounded PNG encodes and durable disk (docs/parsing.md § Figure crops).
+    figures_per_page_max: int = 40
     # Cap on a user's custom system prompt (docs/api.md § Limits).
     system_prompt_max_chars: int = 8000
     # Cap on any upstream response body — a user-controlled endpoint must not be able to
