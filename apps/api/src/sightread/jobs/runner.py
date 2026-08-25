@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..config import Settings
 from ..db.models import Job, JobPage, Result, UsageLog, utcnow
 from ..parsing import poppler
-from ..parsing.figures import save_page_figures
+from ..parsing.figures import discard_job_figures, save_page_figures
 from ..parsing.images import ImageError, normalize_image
 from ..parsing.markdown import PageMarkdown, assemble
 from ..parsing.profiles import transcription_prompt_template
@@ -136,7 +136,10 @@ def partial_result_payload(job: Job, rows: list[JobPage]) -> dict:
     `pages` carries only what is known so far — no page dimensions, which only the final
     outcome holds.
     """
-    finished = [row for row in rows if not row.error and row.markdown]
+    # `is not None`, not truthiness: a blank page stores "" with no error, and it must
+    # count as finished here exactly as it does in the final assembly (which drops empty
+    # bodies itself either way).
+    finished = [row for row in rows if not row.error and row.markdown is not None]
     document = assemble(
         [PageMarkdown(page=row.page_no, markdown=row.markdown or "") for row in finished]
     )
@@ -350,8 +353,15 @@ async def _finish(
     status: str,
     error: str | None = None,
     result: dict | None = None,
+    figures_root: Path | None = None,
 ) -> None:
-    """Write the terminal state and delete the source document (docs/jobs.md § Retention)."""
+    """Write the terminal state and delete the source document (docs/jobs.md § Retention).
+
+    A job that fails also loses its crop directory: crops belong to a result, and this job
+    never wrote one.
+    """
+    if status == "failed" and figures_root is not None:
+        discard_job_figures(figures_root, job_id)
     async with sessionmaker() as db:
         job = await db.get(Job, job_id)
         if job is None:
@@ -400,13 +410,17 @@ async def run_job(
             job.connection_base_url = connection.base_url
             await db.commit()
 
+    figures_root = Path(settings.figures_dir)
+
     if connection is None:
         error = (
             "no OpenRouter key stored"
             if job.connection_id is None
             else "the provider connection for this job no longer exists"
         )
-        await _finish(sessionmaker, job_id, status="failed", error=error)
+        await _finish(
+            sessionmaker, job_id, status="failed", error=error, figures_root=figures_root
+        )
         return
 
     source = Path(job.source_path or "")
@@ -415,7 +429,7 @@ async def run_job(
     state = RunState(
         budget=VisionBudget(settings.vision_concurrency_per_job),
         max_response_bytes=settings.upstream_response_max_bytes,
-        figures_dir=Path(settings.figures_dir) / str(job.id),
+        figures_dir=figures_root / str(job.id),
     )
 
     try:
@@ -423,16 +437,30 @@ async def run_job(
             job, state, connection, source, work_dir, render_slots, sessionmaker
         )
     except JobAborted as exc:
-        await _finish(sessionmaker, job_id, status="failed", error=str(exc))
+        await _finish(
+            sessionmaker, job_id, status="failed", error=str(exc), figures_root=figures_root
+        )
         return
     except (poppler.PopplerError, ImageError, ValueError):
-        await _finish(sessionmaker, job_id, status="failed", error="the document is unreadable")
+        await _finish(
+            sessionmaker,
+            job_id,
+            status="failed",
+            error="the document is unreadable",
+            figures_root=figures_root,
+        )
         return
     except Exception:
         # A worker must not die on one job. The traceback goes to the log; the job row
         # carries no internals and no document content.
         logger.exception("job %s failed unexpectedly", job_id)
-        await _finish(sessionmaker, job_id, status="failed", error="internal error")
+        await _finish(
+            sessionmaker,
+            job_id,
+            status="failed",
+            error="internal error",
+            figures_root=figures_root,
+        )
         return
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
@@ -444,7 +472,11 @@ async def run_job(
         if len(outcomes) > 5:
             reasons += "; …"
         await _finish(
-            sessionmaker, job_id, status="failed", error=f"no page could be parsed ({reasons})"
+            sessionmaker,
+            job_id,
+            status="failed",
+            error=f"no page could be parsed ({reasons})",
+            figures_root=figures_root,
         )
         return
 

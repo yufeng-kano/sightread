@@ -9,6 +9,7 @@ from PIL import Image
 from sightread.parsing.figures import (
     CROP_MARGIN,
     crop_path,
+    discard_job_figures,
     parse_bbox_path,
     save_page_figures,
 )
@@ -72,3 +73,17 @@ def test_crop_path_is_deterministic(tmp_path) -> None:
     job_id = uuid.uuid4()
     path = crop_path(tmp_path, job_id, 2, (10, 20, 30, 40))
     assert path == tmp_path / str(job_id) / "p2_10_20_30_40.png"
+
+
+def test_discard_removes_only_that_jobs_crops(tmp_path) -> None:
+    doomed, kept = uuid.uuid4(), uuid.uuid4()
+    for job_id in (doomed, kept):
+        (tmp_path / str(job_id)).mkdir()
+        (tmp_path / str(job_id) / "p1_0_0_10_10.png").write_bytes(b"x")
+
+    discard_job_figures(tmp_path, doomed)
+
+    assert not (tmp_path / str(doomed)).exists()
+    assert (tmp_path / str(kept) / "p1_0_0_10_10.png").is_file()
+    # A job with no crops is a no-op, not an error.
+    discard_job_figures(tmp_path, uuid.uuid4())

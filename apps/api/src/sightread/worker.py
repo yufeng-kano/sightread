@@ -21,6 +21,7 @@ from .db.session import create_engine, create_sessionmaker
 from .jobs.queue import claim_next_job, requeue_job
 from .jobs.runner import run_job
 from .jobs.sweeper import sweep_forever
+from .parsing.figures import discard_job_figures
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,9 @@ async def run_worker(stop: asyncio.Event) -> None:
                 await asyncio.gather(running, return_exceptions=True)
                 async with sessionmaker() as db:
                     await requeue_job(db, job_id)
+                # The reparse starts from scratch, so the crops of the abandoned attempt
+                # go with the rest of its partial progress (docs/jobs.md § Retention).
+                discard_job_figures(Path(settings.figures_dir), job_id)
                 logger.info("requeued job %s on shutdown", job_id)
     finally:
         sweeper.cancel()

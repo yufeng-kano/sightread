@@ -107,3 +107,42 @@ describe('nodesToMarkdown', () => {
     expect(nodesToMarkdown([section])).toBe('### Notes\n\nBody text.')
   })
 })
+
+describe('nodesToMarkdown on selections that lost their structural root', () => {
+  // Range.cloneContents() copies the parent chain only up to — exclusive of — the common
+  // ancestor, so a drag across one table hands over bare thead/tbody/tr, one row hands
+  // over bare cells, and a list hands over bare li.
+  it('reassembles orphaned thead/tbody/tr runs into one table', () => {
+    const nodes = [
+      el('thead', {}, [
+        el('tr', {}, [el('th', {}, [text('Name')]), el('th', {}, [text('Value')])]),
+      ]),
+      text('\n  '),
+      el('tbody', {}, [
+        el('tr', {}, [el('td', {}, [text('APAC')]), el('td', {}, [text('1,204')])]),
+      ]),
+      el('tr', {}, [el('td', {}, [text('EMEA')]), el('td', {}, [text('903')])]),
+    ]
+
+    expect(nodesToMarkdown(nodes)).toBe(
+      [
+        '| Name | Value |',
+        '| --- | --- |',
+        '| APAC | 1,204 |',
+        '| EMEA | 903 |',
+      ].join('\n'),
+    )
+  })
+
+  it('reassembles orphaned cells into one row', () => {
+    const nodes = [el('td', {}, [text('a')]), el('td', {}, [text('b')])]
+
+    expect(nodesToMarkdown(nodes)).toBe(['| a | b |', '| --- | --- |'].join('\n'))
+  })
+
+  it('reassembles orphaned list items into one bulleted list', () => {
+    const nodes = [el('li', {}, [text('First')]), el('li', {}, [text('Second')])]
+
+    expect(nodesToMarkdown(nodes)).toBe('- First\n- Second')
+  })
+})

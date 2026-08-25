@@ -89,9 +89,11 @@ services:
       - api
 
   backup:
-    # Leaving a managed platform means backups are ours (docs/deployment.md). One dump a
-    # day into ./backups, keeping the newest seven. Deliberately a visible shell loop:
-    # a cron container would hide the schedule and the rotation in two more places.
+    # Leaving a managed platform means backups are ours (docs/deployment.md). One pass a
+    # day into ./backups — the database dump plus an archive of the stored figure crops,
+    # which are durable result data a restored database cannot recreate — keeping the
+    # newest seven of each. Deliberately a visible shell loop: a cron container would hide
+    # the schedule and the rotation in two more places.
     image: postgres:16
     restart: unless-stopped
     environment:
@@ -101,6 +103,7 @@ services:
       PGHOST: pg
     volumes:
       - ./backups:/backups
+      - figures:/data/figures:ro
     depends_on:
       pg:
         condition: service_healthy
@@ -117,8 +120,20 @@ services:
             rm -f "/backups/sightread-$$stamp.dump.tmp"
             echo "backup: pg_dump failed at $$stamp" >&2
           fi
-          # Keep the newest seven dumps; anything older is deleted.
+          # The crops behind the dumped results; restore untars this back into the volume.
+          if tar -czf "/backups/figures-$$stamp.tar.gz.tmp" -C /data figures; then
+            mv "/backups/figures-$$stamp.tar.gz.tmp" "/backups/figures-$$stamp.tar.gz"
+            echo "backup: wrote figures-$$stamp.tar.gz"
+          else
+            rm -f "/backups/figures-$$stamp.tar.gz.tmp"
+            echo "backup: figures archive failed at $$stamp" >&2
+          fi
+          # Keep the newest seven of each; anything older is deleted.
           ls -1t /backups/sightread-*.dump 2>/dev/null | tail -n +8 | while read -r old; do
+            rm -f "$$old"
+            echo "backup: rotated out $$old"
+          done
+          ls -1t /backups/figures-*.tar.gz 2>/dev/null | tail -n +8 | while read -r old; do
             rm -f "$$old"
             echo "backup: rotated out $$old"
           done

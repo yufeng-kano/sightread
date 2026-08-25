@@ -324,6 +324,14 @@ async function fetchResult(document: LibraryDocument) {
   } finally {
     loadingResults.delete(document.id)
   }
+  // The parse can finish while a partial request is in flight: the watcher's final fetch
+  // was swallowed by the in-flight guard, and with nothing left pending the poll has
+  // stopped — so nothing else will ask again. Recheck the row this response landed on.
+  const held = results.get(document.id)
+  const row = documents.value.find((entry) => entry.id === document.id)
+  if (held?.meta.partial && row && !isPending(row)) {
+    void fetchResult(row)
+  }
 }
 
 async function showResult(document: LibraryDocument) {

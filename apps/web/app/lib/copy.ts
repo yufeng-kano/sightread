@@ -72,8 +72,7 @@ function tableRows(node: MarkdownNode): MarkdownNode[] {
   return rows
 }
 
-function tableToMarkdown(node: MarkdownNode): string {
-  const rows = tableRows(node)
+function rowsToMarkdown(rows: MarkdownNode[]): string {
   const lines: string[] = []
   for (const [index, row] of rows.entries()) {
     const cells = children(row).filter((cell) => tag(cell) === 'th' || tag(cell) === 'td')
@@ -88,6 +87,10 @@ function tableToMarkdown(node: MarkdownNode): string {
     }
   }
   return lines.join('\n')
+}
+
+function tableToMarkdown(node: MarkdownNode): string {
+  return rowsToMarkdown(tableRows(node))
 }
 
 function listToMarkdown(node: MarkdownNode): string {
@@ -173,6 +176,79 @@ function flush(walk: Walk): void {
   walk.inline = []
 }
 
+/**
+ * A selection confined to one table or list is cloned *without* its structural root:
+ * `Range.cloneContents()` copies the parent chain only up to — exclusive of — the range's
+ * common ancestor, so dragging across a table hands over bare `thead`/`tbody`/`tr` (or
+ * `td` for one row), and a multi-item list hands over bare `li`. These runs are
+ * reassembled here into the table or list their parent would have made of them.
+ */
+const TABLE_PARTS = new Set(['thead', 'tbody', 'tfoot', 'tr'])
+const CELL_PARTS = new Set(['td', 'th'])
+
+function orphanGroup(node: MarkdownNode): 'rows' | 'cells' | 'items' | null {
+  if (node.nodeType !== ELEMENT_NODE) {
+    return null
+  }
+  const name = tag(node)
+  if (TABLE_PARTS.has(name)) {
+    return 'rows'
+  }
+  if (CELL_PARTS.has(name)) {
+    return 'cells'
+  }
+  if (name === 'li') {
+    return 'items'
+  }
+  return null
+}
+
+function orphansToMarkdown(kind: 'rows' | 'cells' | 'items', group: MarkdownNode[]): string {
+  if (kind === 'rows') {
+    return rowsToMarkdown(group.flatMap((part) => (tag(part) === 'tr' ? [part] : tableRows(part))))
+  }
+  if (kind === 'cells') {
+    // Cells with no row: one row's worth of a table.
+    return rowsToMarkdown([{ nodeType: ELEMENT_NODE, tagName: 'TR', childNodes: group }])
+  }
+  // Items with no list: the marker kind is gone with the ancestor, so bullets.
+  return group.map((item) => `- ${inlineText(item).replace(/\s+/g, ' ').trim()}`).join('\n')
+}
+
+function walkNodes(nodes: MarkdownNode[], walk: Walk): void {
+  let index = 0
+  while (index < nodes.length) {
+    const node = nodes[index]!
+    const kind = orphanGroup(node)
+    if (kind !== null) {
+      // Consecutive orphaned parts are one structure, not a block each; formatting
+      // whitespace between them does not break the run.
+      const group: MarkdownNode[] = []
+      while (index < nodes.length) {
+        const candidate = nodes[index]!
+        if (orphanGroup(candidate) === kind) {
+          group.push(candidate)
+          index += 1
+          continue
+        }
+        if (candidate.nodeType === TEXT_NODE && !(candidate.textContent ?? '').trim()) {
+          index += 1
+          continue
+        }
+        break
+      }
+      flush(walk)
+      const block = orphansToMarkdown(kind, group)
+      if (block) {
+        walk.blocks.push(block)
+      }
+      continue
+    }
+    walkNode(node, walk)
+    index += 1
+  }
+}
+
 function walkNode(node: MarkdownNode, walk: Walk): void {
   // Consecutive inline runs — text and math spans from inside one paragraph — stay one
   // line rather than becoming a block each.
@@ -193,22 +269,19 @@ function walkNode(node: MarkdownNode, walk: Walk): void {
   }
   // A container (section, article, div): its children are blocks of their own.
   flush(walk)
-  for (const child of children(node)) {
-    walkNode(child, walk)
-  }
+  walkNodes(children(node), walk)
   flush(walk)
 }
 
 /**
  * The selection fragment as markdown. A selection inside one paragraph comes back as the
  * plain text it looks like (math spans as their `$…$`); anything structural comes back as
- * source a markdown editor will re-render.
+ * source a markdown editor will re-render — including a selection whose table or list
+ * root the range clone left behind.
  */
 export function nodesToMarkdown(nodes: ArrayLike<MarkdownNode>): string {
   const walk: Walk = { blocks: [], inline: [] }
-  for (const node of Array.from(nodes)) {
-    walkNode(node, walk)
-  }
+  walkNodes(Array.from(nodes), walk)
   flush(walk)
   return walk.blocks.join('\n\n')
 }

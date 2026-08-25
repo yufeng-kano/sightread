@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import uuid
 from pathlib import Path
 
@@ -45,6 +46,17 @@ def crop_path(figures_dir: Path, job_id: uuid.UUID, page: int, bbox: Bbox) -> Pa
     """Where one figure's crop lives. Deterministic from the placeholder alone."""
     y_min, x_min, y_max, x_max = bbox
     return figures_dir / str(job_id) / f"p{page}_{y_min}_{x_min}_{y_max}_{x_max}.png"
+
+
+def discard_job_figures(figures_dir: Path, job_id: uuid.UUID) -> None:
+    """Remove one job's crop directory.
+
+    Crops live exactly as long as something references them (docs/jobs.md § Retention): a
+    job that fails wrote no result, and a requeued job reparses from scratch — either way
+    the crops of the abandoned attempt must go with it, or a reparse whose transcription
+    emits different boxes would leave the first attempt's files answering figure routes.
+    """
+    shutil.rmtree(figures_dir / str(job_id), ignore_errors=True)
 
 
 def save_page_figures(markdown: str, image_path: Path, page: int, job_dir: Path) -> int:

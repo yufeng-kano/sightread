@@ -329,6 +329,9 @@ async def test_a_second_402_aborts_the_job(api_client, sessionmaker, documents) 
     assert status["status"] == "failed"
     assert status["error"] == "the upstream reported exhausted credits"
     assert (await api_client.get(f"/v1/jobs/{job_id}/result")).status_code == 404
+    # A failed job keeps no crops: whatever pages managed to save one before the abort,
+    # the directory goes with the result the job never wrote (docs/jobs.md § Retention).
+    assert not (Path(api_client.app.state.settings.figures_dir) / job_id).exists()
 
 
 @respx.mock
