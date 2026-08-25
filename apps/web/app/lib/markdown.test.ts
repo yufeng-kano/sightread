@@ -483,6 +483,13 @@ describe('parseInline', () => {
     ])
   })
 
+  it('does not let a rejected price steal a closer from inside a later code span', () => {
+    expect(parseInline('cost $5 and `$x$`')).toEqual([
+      { kind: 'text', text: 'cost $5 and ' },
+      { kind: 'code', text: '$x$', src: '`$x$`' },
+    ])
+  })
+
   it('lets an unclosed backtick protect nothing', () => {
     expect(parseInline('a ` b $x$')).toEqual([
       { kind: 'text', text: 'a ` b ' },

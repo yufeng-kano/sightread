@@ -330,8 +330,11 @@ export type InlineSegment =
   | { kind: 'br'; src: string }
 
 /** A `$…$` span anchored at one candidate opener: closes on `$` not followed by a digit —
- *  so "$5 and $6" stays two prices, not a formula. */
-const MATH_SPAN_AT = /^\$([^$\n]+)\$(?!\d)/
+ *  so "$5 and $6" stays two prices, not a formula. The content never crosses a backtick:
+ *  a rejected price before a code span (``cost $5 and `$x$` ``) must not steal its
+ *  closer from inside the code — the failed candidate leaves the code-span guard in
+ *  `parseInline` to protect those dollars, and TeX has no backticks to lose. */
+const MATH_SPAN_AT = /^\$([^$`\n]+)\$(?!\d)/
 
 /** `<br>` in a table cell is a line break, not text — the one HTML tag transcriptions use. */
 const BR_AT = /^<br\s*\/?>/i
