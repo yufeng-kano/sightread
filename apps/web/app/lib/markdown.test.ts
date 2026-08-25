@@ -401,6 +401,46 @@ describe('parseInline', () => {
     expect(parseInline('*a\\*')).toEqual([{ kind: 'text', text: '*a\\*' }])
   })
 
+  it('reads a triple-asterisk run as em holding strong', () => {
+    expect(parseInline('***text***')).toEqual([
+      {
+        kind: 'em',
+        segments: [
+          { kind: 'strong', segments: [{ kind: 'text', text: 'text' }], src: '**text**' },
+        ],
+        src: '***text***',
+      },
+    ])
+  })
+
+  it('nests strong inside single-asterisk emphasis', () => {
+    expect(parseInline('*outer **inner** text*')).toEqual([
+      {
+        kind: 'em',
+        segments: [
+          { kind: 'text', text: 'outer ' },
+          { kind: 'strong', segments: [{ kind: 'text', text: 'inner' }], src: '**inner**' },
+          { kind: 'text', text: ' text' },
+        ],
+        src: '*outer **inner** text*',
+      },
+    ])
+  })
+
+  it('nests em inside strong', () => {
+    expect(parseInline('**a *b* c**')).toEqual([
+      {
+        kind: 'strong',
+        segments: [
+          { kind: 'text', text: 'a ' },
+          { kind: 'em', segments: [{ kind: 'text', text: 'b' }], src: '*b*' },
+          { kind: 'text', text: ' c' },
+        ],
+        src: '**a *b* c**',
+      },
+    ])
+  })
+
   it('keeps dollars inside a code span as code, not math', () => {
     expect(parseInline('write `$x$` literally')).toEqual([
       { kind: 'text', text: 'write ' },

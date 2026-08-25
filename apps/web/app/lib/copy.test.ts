@@ -220,20 +220,29 @@ describe('partially selected styled elements', () => {
 describe('display math cut by a selection boundary', () => {
   const source = '$$\nx = 1\n$$'
 
-  function mathBlock() {
-    return el('div', { class: 'md-math-block', 'data-md': source }, [
+  function mathBlock(id: string, glyphs: string) {
+    return el('div', { class: 'md-math-block', 'data-md': source, 'data-md-id': id }, [
       el('span', { class: 'katex' }, [
         el('span', { class: 'katex-mathml' }, [text('x=1 mathml mirror')]),
-        el('span', { class: 'katex-html' }, [text('= 1')]),
+        el('span', { class: 'katex-html' }, [text(glyphs)]),
       ]),
     ])
   }
 
   it('copies only the surviving glyph text when the block is named partial', () => {
-    expect(nodesToMarkdown([mathBlock()], undefined, new Set([source]))).toBe('= 1')
+    expect(nodesToMarkdown([mathBlock('m1', '= 1')], undefined, new Set(['m1']))).toBe('= 1')
   })
 
   it('still hands back the full source when the block was swallowed whole', () => {
-    expect(nodesToMarkdown([mathBlock()])).toBe(source)
+    expect(nodesToMarkdown([mathBlock('m1', 'x = 1')])).toBe(source)
+  })
+
+  it('downgrades only the cut twin of a repeated formula', () => {
+    const cut = mathBlock('m1', '= 1')
+    const whole = mathBlock('m2', 'x = 1')
+
+    expect(nodesToMarkdown([cut, whole], undefined, new Set(['m1']))).toBe(
+      ['= 1', source].join('\n\n'),
+    )
   })
 })

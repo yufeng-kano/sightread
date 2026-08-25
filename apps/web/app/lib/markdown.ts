@@ -347,8 +347,13 @@ const CODE_AT = /^`([^`\n]+)`/
 // A backslash-escaped closer is a literal character, so it cannot close a span either
 // (the `(?<!\\)` on each closing marker).
 const WORD_CHAR = /[\p{L}\p{N}_]/u
+/** `***text***` is em(strong(text)) — matched before the pair forms, which would
+ *  otherwise close two asterisks early and strand the third. */
+const TRIPLE_AST_AT = /^\*\*\*(?![\s*])([^*\n]+?)(?<=\S)(?<!\\)\*\*\*(?!\*)/
 const STRONG_AST_AT = /^\*\*(?!\s)((?:[^*\n]|\*(?!\*))+?)(?<=\S)(?<!\\)\*\*/
-const EM_AST_AT = /^\*(?![\s*])([^*\n]+?)(?<=\S)(?<!\\)\*(?!\*)/
+/** An em's interior admits `**` pairs — `*outer **inner** text*` nests — but never a
+ *  single `*`, which would be indistinguishable from its own closer. */
+const EM_AST_AT = /^\*(?![\s*])((?:[^*\n]|\*\*(?!\*))+?)(?<=\S)(?<!\\)\*(?!\*)/
 const STRONG_UND_AT = /^__(?!\s)((?:[^_\n]|_(?!_))+?)(?<=\S)(?<!\\)__(?![\p{L}\p{N}_])/u
 const EM_UND_AT = /^_(?![\s_])([^_\n]+?)(?<=\S)(?<!\\)_(?![\p{L}\p{N}_])/u
 
@@ -407,6 +412,24 @@ function parseStyled(text: string): InlineSegment[] {
       }
       scan += 1
       continue
+    }
+    // `***text***` reads as em holding strong, the way GFM resolves the triple run.
+    if (char === '*') {
+      const triple = TRIPLE_AST_AT.exec(rest)
+      if (triple) {
+        const content = triple[1] ?? ''
+        push(
+          {
+            kind: 'em',
+            segments: [
+              { kind: 'strong', segments: parseStyled(content), src: `**${content}**` },
+            ],
+            src: triple[0],
+          },
+          triple[0].length,
+        )
+        continue
+      }
     }
     // Underscores open emphasis only off a word: mid-identifier they are identifier —
     // in any script, so `café_value` and `測試_變數` stay text (\p{L}, not [A-Za-z]).

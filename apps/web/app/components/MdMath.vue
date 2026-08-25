@@ -14,11 +14,22 @@ const props = defineProps<{ tex: string }>()
 
 const html = computed(() => renderTexHtml(props.tex, true))
 const source = computed(() => `$$\n${props.tex}\n$$`)
+
+/** Identifies this *occurrence*: a document can repeat a formula, and the copy handler's
+ *  partial-selection set must not tar every twin with one boundary cut (docs/web.md). */
+const blockId = useId()
 </script>
 
 <template>
-  <!-- eslint-disable-next-line vue/no-v-html -- KaTeX escapes its input; `trust` is off -->
-  <div v-if="html !== null" class="md-math-block" :data-md="source" v-html="html" />
+  <!-- eslint-disable vue/no-v-html -- KaTeX escapes its input; `trust` is off -->
+  <div
+    v-if="html !== null"
+    class="md-math-block"
+    :data-md="source"
+    :data-md-id="blockId"
+    v-html="html"
+  />
+  <!-- eslint-enable vue/no-v-html -->
   <pre v-else class="md-math">{{ tex }}</pre>
 </template>
 

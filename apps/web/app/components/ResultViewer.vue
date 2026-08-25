@@ -264,17 +264,19 @@ function tableRegionMarkdown(selection: Selection): string | null {
  * block's element — and its full `data-md` — over truncated KaTeX children, so the
  * serializer must not trust the source for these blocks and copies their surviving glyph
  * text instead. A block the selection swallowed whole leaves both boundaries outside it
- * and is not collected here.
+ * and is not collected here. Blocks are named by their per-occurrence `data-md-id`, not
+ * their source — a document can repeat a formula, and a boundary in one twin must not
+ * downgrade the other.
  */
-function partialMathSources(selection: Selection): Set<string> {
+function partialMathBlocks(selection: Selection): Set<string> {
   const partial = new Set<string>()
   for (let index = 0; index < selection.rangeCount; index += 1) {
     const range = selection.getRangeAt(index)
     for (const container of [range.startContainer, range.endContainer]) {
       const element = container instanceof Element ? container : container.parentElement
-      const source = element?.closest('.md-math-block')?.getAttribute('data-md')
-      if (source) {
-        partial.add(source)
+      const id = element?.closest('.md-math-block')?.getAttribute('data-md-id')
+      if (id) {
+        partial.add(id)
       }
     }
   }
@@ -287,7 +289,7 @@ function onCopy(event: ClipboardEvent) {
   if (!selection || selection.isCollapsed || !event.clipboardData) {
     return
   }
-  const partialMath = partialMathSources(selection)
+  const partialMath = partialMathBlocks(selection)
   const region = tableRegionMarkdown(selection)
   const fragments: string[] = []
   if (region) {
