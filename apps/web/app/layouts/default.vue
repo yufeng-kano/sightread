@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ComponentPublicInstance } from 'vue'
+import type { MenuItem, Point } from '~/lib/menu'
 
 /**
  * The signed-in frame.
@@ -9,20 +10,20 @@ import type { ComponentPublicInstance } from 'vue'
  * data column that scroll independently (docs/web.md § Design system). Nothing in the
  * signed-in app puts a whole screen on one scrollbar.
  *
- * The account row is the signed-in home of the locale choice: the avatar-and-name button
- * discloses a small popover holding the locale links (real links — the locale lives in
- * the URL). Sign-out stays its own control beside it, never inside the popover
- * (docs/web.md § Rules).
+ * The account row is the session's own menu: the avatar-and-name button opens `UiContextMenu`
+ * — the same floating surface the library's right-click opens — headed by the address that is
+ * signed in, holding Settings, Language, and sign-out below a rule. Everything the account is,
+ * in one place, the way a desktop app's account menu holds it. Language is a row rather than a
+ * submenu: it opens `LanguageDialog` (docs/web.md § The account menu).
  *
  * Below 900px the rail collapses above the data region (each screen's own stylesheets do
  * that) and the sidebar becomes a drawer behind a menu button. No icon rail and no bottom
  * tab bar: the labels are doing the work, and a tab bar would spend the scarcest axis on a
  * phone.
  */
-const { t, locale, locales } = useI18n()
+const { t } = useI18n()
 const route = useRoute()
 const localePath = useLocalePath()
-const switchLocalePath = useSwitchLocalePath()
 const auth = useAuth()
 
 /**
@@ -50,38 +51,57 @@ watch(picture, () => {
 })
 const initial = computed(() => (account.value[0] ?? '?').toUpperCase())
 
-// --- the account popover: where the locale is chosen once signed in ----------
+// --- the account menu --------------------------------------------------------
 
-const accountMenuOpen = ref(false)
-const accountMenu = ref<HTMLElement | null>(null)
 const accountButton = ref<HTMLElement | null>(null)
+/** Where the menu is anchored, and whether it is open at all. */
+const accountMenu = ref<Point | null>(null)
 
-// A locale link navigates; the route change is what closes the popover.
-watch(() => route.path, () => {
-  accountMenuOpen.value = false
-})
+/**
+ * When the open menu last closed itself. Pressing the row while the menu is up closes it on
+ * `pointerdown` — the menu dismisses on a press anywhere outside itself — and the `click`
+ * that follows would then reopen it, so a second press on the row would never close it. The
+ * press that dismissed a menu is not a press that opens one.
+ */
+let accountMenuClosedAt = 0
 
-function onAccountPointerDown(event: PointerEvent) {
-  if (!accountMenuOpen.value) return
-  const target = event.target as Node | null
-  if (accountMenu.value?.contains(target) || accountButton.value?.contains(target)) return
-  accountMenuOpen.value = false
+/** Anchored to the row's top-left. The row sits at the foot of a full-height sidebar, so
+ *  `placeMenu` never finds room below it and flips it up over the nav — which is where an
+ *  account menu belongs. */
+function toggleAccountMenu() {
+  if (accountMenu.value || performance.now() - accountMenuClosedAt < 200) {
+    accountMenu.value = null
+    return
+  }
+  const box = accountButton.value?.getBoundingClientRect()
+  accountMenu.value = box ? { x: box.left, y: box.top } : { x: 0, y: 0 }
 }
 
-function onAccountKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape' && accountMenuOpen.value) {
-    accountMenuOpen.value = false
-    accountButton.value?.focus()
+function closeAccountMenu() {
+  accountMenu.value = null
+  accountMenuClosedAt = performance.now()
+}
+
+const accountItems = computed<MenuItem[]>(() => [
+  { key: 'settings', label: t('nav.settings'), icon: 'settings', to: localePath('/settings') },
+  { key: 'language', label: t('nav.language'), icon: 'globe' },
+  { key: 'signOut', label: t('nav.signOut'), icon: 'sign-out', separated: true },
+])
+
+/** The language dialog the menu's Language row opens (`LanguageDialog`). */
+const languageOpen = ref(false)
+
+function onAccountAction(action: string) {
+  if (action === 'language') {
+    languageOpen.value = true
+  } else if (action === 'signOut') {
+    void signOut()
   }
 }
 
-onMounted(() => {
-  document.addEventListener('pointerdown', onAccountPointerDown)
-  document.addEventListener('keydown', onAccountKeydown)
-})
-onBeforeUnmount(() => {
-  document.removeEventListener('pointerdown', onAccountPointerDown)
-  document.removeEventListener('keydown', onAccountKeydown)
+// Following a menu item navigates; the route change is what closes the menu.
+watch(() => route.path, () => {
+  accountMenu.value = null
 })
 
 const sidebar = ref<HTMLElement | null>(null)
@@ -190,25 +210,8 @@ async function signOut() {
         </NuxtLink>
       </nav>
 
-      <!-- Who is signed in: the avatar-and-name button discloses the locale popover, and
-           the one control that ends the session sits beside it, never inside. -->
+      <!-- Who is signed in: one button, opening the one menu the session has. -->
       <div class="sidebar-foot">
-        <div v-if="accountMenuOpen" ref="accountMenu" class="account-menu">
-          <p class="account-menu-title eyebrow">{{ t('nav.language') }}</p>
-          <nav class="locales" :aria-label="t('nav.language')">
-            <NuxtLink
-              v-for="option in locales"
-              :key="option.code"
-              class="locale"
-              :class="{ active: option.code === locale }"
-              :to="switchLocalePath(option.code)"
-              :aria-current="option.code === locale ? 'true' : undefined"
-            >
-              {{ option.name }}
-            </NuxtLink>
-          </nav>
-        </div>
-
         <!-- Rendered even while `GET /api/me` is still in flight: the label is the row's
              only flexible track, and dropping it would slide the button across the foot the
              moment the identity arrives. -->
@@ -217,9 +220,9 @@ async function signOut() {
           type="button"
           class="account"
           :title="account || undefined"
-          aria-haspopup="true"
-          :aria-expanded="accountMenuOpen ? 'true' : 'false'"
-          @click="accountMenuOpen = !accountMenuOpen"
+          aria-haspopup="menu"
+          :aria-expanded="accountMenu ? 'true' : 'false'"
+          @click="toggleAccountMenu"
         >
           <img
             v-if="picture && !pictureFailed"
@@ -231,10 +234,20 @@ async function signOut() {
           >
           <span v-else class="avatar avatar-initial" aria-hidden="true">{{ initial }}</span>
           <span class="account-label">{{ account }}</span>
+          <UiIcon class="account-caret" name="chevron-down" />
         </button>
-        <button type="button" class="sign-out" :title="t('nav.signOut')" :aria-label="t('nav.signOut')" @click="signOut">
-          <UiIcon name="sign-out" />
-        </button>
+
+        <UiContextMenu
+          v-if="accountMenu"
+          :at="accountMenu"
+          :items="accountItems"
+          :label="account"
+          :header="auth.me.value?.user.email"
+          @select="onAccountAction"
+          @close="closeAccountMenu"
+        />
+
+        <LanguageDialog v-if="languageOpen" @close="languageOpen = false" />
       </div>
     </aside>
 
@@ -388,17 +401,15 @@ async function signOut() {
 /* Pinned to the bottom, divided by a rule: the session's own row. The popover anchors
    to it, so it owns a positioning context. */
 .sidebar-foot {
-  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
   margin-top: auto;
   padding-top: var(--space-4);
   border-top: 1px solid var(--line-strong);
 }
 
-/* The disclosure: the avatar and name are one button, styled as the plain row they
-   replace — borderless, with the same hover shift the nav rows use. */
+/* The disclosure: the avatar, the name and the caret are one button, styled as the plain
+   row it replaces — borderless, with the same hover shift the nav rows use. */
 .account {
   display: flex;
   align-items: center;
@@ -445,86 +456,13 @@ async function signOut() {
   color: var(--ink);
 }
 
-/* Above the row it discloses from, on the panel surface. A border bounds it — the one
-   shadow stays reserved for dialogs and the drawer (docs/web.md § Design system). */
-.account-menu {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: calc(100% + var(--space-2));
-  padding: var(--space-4);
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius);
-  background: var(--paper);
-}
-
-.account-menu-title {
-  margin: 0 0 var(--space-3);
-}
-
-.locales {
-  display: inline-flex;
-  gap: var(--space-5);
-}
-
-.locale {
-  color: var(--muted);
-  white-space: nowrap;
-  font-size: var(--text-sm);
-  transition: color var(--duration-fast) var(--ease);
-}
-
-.locale:hover {
-  color: var(--accent);
-}
-
-/* The same treatment as the sign-in footer: ink and a weight step, underlined in the
-   accent — the accent's one navigational use. */
-.locale.active {
-  color: var(--ink);
-  font-weight: var(--weight-semibold);
-  padding-bottom: 2px;
-  border-bottom: 1px solid var(--accent);
-}
-
-/* Borderless and small — it sits in a row of text, not in a row of controls, so a bordered
-   button here would read as the row's primary action. */
-.sign-out {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
+/* The one mark that says this row opens something, kept quiet: on a menu that opens upward
+   it points at the row, not away from it. */
+.account-caret {
+  width: 13px;
+  height: 13px;
   flex-shrink: 0;
-  padding: 0;
-  border: none;
-  background: transparent;
   color: var(--faint);
-  cursor: pointer;
-  transition: color var(--duration-fast) var(--ease);
-}
-
-/*
- * The glyph stays 24px on a touch screen — it is a quiet control in a row of text — but the
- * box you press grows to the same target as every other control there. Negative margins
- * keep the taller hit area from pushing the foot row apart, so the design does not change,
- * only what counts as a tap.
- */
-@media (pointer: coarse) {
-  .sign-out {
-    width: var(--control-height);
-    height: var(--control-height);
-    margin: calc((var(--control-height) - 24px) / -2);
-  }
-}
-
-.sign-out:hover {
-  color: var(--ink);
-}
-
-.sign-out :deep(svg) {
-  width: 15px;
-  height: 15px;
 }
 
 /* --- Content -------------------------------------------------------------- */

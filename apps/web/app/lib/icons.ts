@@ -1,0 +1,32 @@
+/**
+ * Every glyph `UiIcon` draws, as a type.
+ *
+ * Here rather than on the component so anything that *names* an icon without drawing it —
+ * a nav entry, a context-menu item — is checked against the same list (docs/web.md).
+ */
+export type IconName =
+  | 'refresh'
+  | 'copy'
+  | 'check'
+  | 'plus'
+  | 'edit'
+  | 'trash'
+  | 'close'
+  | 'sign-out'
+  | 'menu'
+  | 'dashboard'
+  | 'keys'
+  | 'files'
+  | 'history'
+  | 'connect'
+  | 'settings'
+  | 'globe'
+  | 'scan-text'
+  | 'folder'
+  | 'folder-open'
+  | 'folder-input'
+  | 'file-text'
+  | 'image'
+  | 'upload'
+  | 'chevron-right'
+  | 'chevron-down'

@@ -14,33 +14,9 @@
  * becomes both the accessible name and the tooltip) and a nav item in the word beside it,
  * never in the glyph — so this is unconditionally `aria-hidden`.
  */
-defineProps<{
-  name:
-    | 'refresh'
-    | 'copy'
-    | 'check'
-    | 'plus'
-    | 'edit'
-    | 'trash'
-    | 'close'
-    | 'sign-out'
-    | 'menu'
-    | 'dashboard'
-    | 'keys'
-    | 'files'
-    | 'history'
-    | 'connect'
-    | 'settings'
-    | 'scan-text'
-    | 'folder'
-    | 'folder-open'
-    | 'folder-input'
-    | 'file-text'
-    | 'image'
-    | 'upload'
-    | 'chevron-right'
-    | 'chevron-down'
-}>()
+import type { IconName } from '~/lib/icons'
+
+defineProps<{ name: IconName }>()
 </script>
 
 <template>
@@ -90,6 +66,14 @@ defineProps<{
       <path d="M9 2v6M15 2v6" />
       <path d="M6 8h12v3a6 6 0 0 1-12 0V8z" />
       <path d="M12 17v5" />
+    </template>
+
+    <!-- globe (Language): a sphere with a meridian and the equator — the one mark every
+         product uses for a locale, so it needs no learning. -->
+    <template v-else-if="name === 'globe'">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18z" />
     </template>
 
     <!-- sliders-horizontal (Settings): a gear's teeth turn to mush at this size. -->
