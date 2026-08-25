@@ -230,6 +230,7 @@ async def _process_pdf_page(
     source: Path,
     work_dir: Path,
     render_slots: asyncio.Semaphore,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> PageOutcome:
     size = info.page_size(page_no)
     outcome = PageOutcome(
@@ -243,6 +244,7 @@ async def _process_pdf_page(
         # The Poppler detail is diagnostic (its stderr), never document content.
         logger.warning("job %s page %d render failed: %s", job.id, page_no, exc)
         outcome.error = "render failed"
+        await _record_page(sessionmaker, job, outcome)
         return outcome
 
     try:
@@ -261,6 +263,11 @@ async def _process_pdf_page(
         )
         if transcription is not None:
             outcome.markdown = transcription.markdown
+        # Billing before the optional raster work: a SIGTERM landing mid-crop cancels this
+        # task, and the requeued reparse bills the page again — the call that already ran
+        # must be in `usage_log` first.
+        await _record_page(sessionmaker, job, outcome)
+        if transcription is not None:
             await _save_figures(state, outcome.markdown, image, page_no)
     finally:
         # The rendered page has served its purpose; nothing may outlive the call.
@@ -269,12 +276,21 @@ async def _process_pdf_page(
 
 
 async def _process_image(
-    job: Job, state: RunState, connection: Connection, source: Path, work_dir: Path
+    job: Job,
+    state: RunState,
+    connection: Connection,
+    source: Path,
+    work_dir: Path,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> PageOutcome:
     try:
         normalized = normalize_image(source, work_dir)
     except ImageError:
-        return PageOutcome(page=1, width_pt=0, height_pt=0, error="the image could not be decoded")
+        outcome = PageOutcome(
+            page=1, width_pt=0, height_pt=0, error="the image could not be decoded"
+        )
+        await _record_page(sessionmaker, job, outcome)
+        return outcome
 
     outcome = PageOutcome(
         page=1,
@@ -298,6 +314,9 @@ async def _process_image(
         )
         if transcription is not None:
             outcome.markdown = transcription.markdown
+        # Same ordering as the PDF path: the billed call is persisted before crop work.
+        await _record_page(sessionmaker, job, outcome)
+        if transcription is not None:
             await _save_figures(state, outcome.markdown, normalized.path, 1)
     finally:
         normalized.path.unlink(missing_ok=True)
@@ -535,11 +554,9 @@ async def _process_job(
     render_slots: asyncio.Semaphore,
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> list[PageOutcome]:
-    """Fan the job's pages out and record each as it finishes."""
+    """Fan the job's pages out; each page records itself the moment its billed call ran."""
     if job.kind == "image":
-        outcome = await _process_image(job, state, connection, source, work_dir)
-        await _record_page(sessionmaker, job, outcome)
-        return [outcome]
+        return [await _process_image(job, state, connection, source, work_dir, sessionmaker)]
 
     info = await poppler.pdf_info(source, cwd=work_dir)
     page_numbers = parse_pages_spec(job.pages_spec, info.page_count)
@@ -547,11 +564,9 @@ async def _process_job(
     outcomes: dict[int, PageOutcome] = {}
 
     async def process(page_no: int) -> None:
-        outcome = await _process_pdf_page(
-            job, state, connection, info, page_no, source, work_dir, render_slots
+        outcomes[page_no] = await _process_pdf_page(
+            job, state, connection, info, page_no, source, work_dir, render_slots, sessionmaker
         )
-        outcomes[page_no] = outcome
-        await _record_page(sessionmaker, job, outcome)
 
     try:
         async with asyncio.TaskGroup() as group:

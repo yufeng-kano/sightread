@@ -317,7 +317,15 @@ describe('parseInline', () => {
 
     expect(segments[0]!.kind).toBe('math')
     expect((segments[0] as { tokens: MathToken[] }).tokens).toEqual([
-      { kind: 'text', text: '\\frobnicatex' },
+      { kind: 'text', text: '\\frobnicate{x}' },
+    ])
+  })
+
+  it('keeps the braces of an unsupported command with several arguments', () => {
+    const segments = parseInline('$\\frac{a}{b}$')
+
+    expect((segments[0] as { tokens: MathToken[] }).tokens).toEqual([
+      { kind: 'text', text: '\\frac{a}{b}' },
     ])
   })
 

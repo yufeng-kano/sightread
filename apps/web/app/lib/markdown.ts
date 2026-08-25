@@ -412,8 +412,18 @@ function tokenizeMath(tex: string, kind: MathToken['kind'], out: MathToken[]): v
         pushToken(out, kind, MATH_SYMBOLS[name] ?? '')
         index = next
       } else {
+        // Unknown command: keep it readable as source — including its braced arguments'
+        // delimiters, or `\frac{a}{b}` collapses into `\fracab`.
         pushToken(out, kind, command)
-        index = next
+        let cursor = next
+        while (tex[cursor] === '{') {
+          const [argument, past] = readArgument(tex, cursor)
+          pushToken(out, kind, '{')
+          tokenizeMath(argument, kind, out)
+          pushToken(out, kind, '}')
+          cursor = past
+        }
+        index = cursor
       }
       continue
     }

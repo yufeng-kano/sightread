@@ -545,12 +545,17 @@ async def delete_document(document_id: int, user: SessionUser, db: DbSession) ->
 @router.get("/documents/{document_id}/result")
 async def document_result(document_id: int, user: SessionUser, db: DbSession):
     row = await owned_document(db, user.id, document_id)
+    # The job before the result, deliberately: under READ COMMITTED each statement gets its
+    # own snapshot, so read the other way a job finishing between the two reads answers
+    # "no result" + "succeeded" — a 404 for a result that now exists. This way the same
+    # race reads "running" and answers a partial instead, which the next poll replaces.
+    job = await job_of(db, row.job_id)
     result = (
         await db.execute(select(Result).where(Result.job_id == row.job_id))
     ).scalar_one_or_none()
     if result is not None:
         return result_payload(result)
-    return await partial_result(db, await job_of(db, row.job_id))
+    return await partial_result(db, job)
 
 
 async def partial_result(db: DbSession, job: Job) -> dict:

@@ -145,4 +145,10 @@ describe('nodesToMarkdown on selections that lost their structural root', () => 
 
     expect(nodesToMarkdown(nodes)).toBe('- First\n- Second')
   })
+
+  it('keeps an ordered selection ordered when the live range supplies its list context', () => {
+    const nodes = [el('li', {}, [text('Review')]), el('li', {}, [text('Submit')])]
+
+    expect(nodesToMarkdown(nodes, { ordered: true, start: 5 })).toBe('5. Review\n6. Submit')
+  })
 })

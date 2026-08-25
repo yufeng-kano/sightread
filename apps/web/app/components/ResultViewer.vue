@@ -28,7 +28,7 @@
  */
 import type { ComponentPublicInstance } from 'vue'
 import type { JobResult } from '~/lib/api'
-import { nodesToMarkdown } from '~/lib/copy'
+import { nodesToMarkdown, type OrphanListContext } from '~/lib/copy'
 import { formatBbox, parseResultMarkdown, type Bbox, type ResultBlock } from '~/lib/markdown'
 
 const props = withDefaults(
@@ -184,6 +184,31 @@ function figureSource(page: number, block: ResultBlock & { kind: 'fig' }): strin
 
 // --- copy as markdown ------------------------------------------------------
 
+/**
+ * What the cloned fragment can no longer say about a list selection: the clone drops the
+ * range's common ancestor, so an all-inside-one-list selection arrives as bare `li` runs.
+ * The live range still knows the list — its kind, and the number the first selected item
+ * carries — and hands both to the serializer.
+ */
+function orphanListContext(range: Range): OrphanListContext | undefined {
+  const container = range.commonAncestorContainer
+  const element = container instanceof Element ? container : container.parentElement
+  const list = element?.closest('.md-list')
+  if (!list) {
+    return undefined
+  }
+  if (list.tagName !== 'OL') {
+    return { ordered: false, start: 1 }
+  }
+  const start = Number.parseInt(list.getAttribute('start') ?? '1', 10) || 1
+  const startNode = range.startContainer
+  const startElement = startNode instanceof Element ? startNode : startNode.parentElement
+  const item = startElement?.closest('li')
+  const items = Array.from(list.children).filter((child) => child.tagName === 'LI')
+  const offset = item ? Math.max(0, items.indexOf(item)) : 0
+  return { ordered: true, start: start + offset }
+}
+
 /** Ctrl+C inside the document copies markdown, tables included (docs/web.md). */
 function onCopy(event: ClipboardEvent) {
   const selection = window.getSelection()
@@ -193,7 +218,8 @@ function onCopy(event: ClipboardEvent) {
   const fragments: string[] = []
   // Firefox hands a table-region selection over as one range per cell.
   for (let index = 0; index < selection.rangeCount; index += 1) {
-    const markdown = nodesToMarkdown(selection.getRangeAt(index).cloneContents().childNodes)
+    const range = selection.getRangeAt(index)
+    const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
     if (markdown) {
       fragments.push(markdown)
     }

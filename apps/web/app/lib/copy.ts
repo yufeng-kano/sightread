@@ -203,7 +203,19 @@ function orphanGroup(node: MarkdownNode): 'rows' | 'cells' | 'items' | null {
   return null
 }
 
-function orphansToMarkdown(kind: 'rows' | 'cells' | 'items', group: MarkdownNode[]): string {
+/** What the selection's own DOM knows about the list its cloned `li` runs fell out of —
+ *  computed by the copy handler from the live range, since the clone no longer holds it. */
+export interface OrphanListContext {
+  ordered: boolean
+  /** The number the first selected item carries in the live list. */
+  start: number
+}
+
+function orphansToMarkdown(
+  kind: 'rows' | 'cells' | 'items',
+  group: MarkdownNode[],
+  list?: OrphanListContext,
+): string {
   if (kind === 'rows') {
     return rowsToMarkdown(group.flatMap((part) => (tag(part) === 'tr' ? [part] : tableRows(part))))
   }
@@ -211,11 +223,17 @@ function orphansToMarkdown(kind: 'rows' | 'cells' | 'items', group: MarkdownNode
     // Cells with no row: one row's worth of a table.
     return rowsToMarkdown([{ nodeType: ELEMENT_NODE, tagName: 'TR', childNodes: group }])
   }
-  // Items with no list: the marker kind is gone with the ancestor, so bullets.
-  return group.map((item) => `- ${inlineText(item).replace(/\s+/g, ' ').trim()}`).join('\n')
+  // Items with no list: the live selection's context says what the ancestor was — an
+  // ordered run keeps its numbering. Without context, bullets.
+  return group
+    .map((item, index) => {
+      const marker = list?.ordered ? `${list.start + index}.` : '-'
+      return `${marker} ${inlineText(item).replace(/\s+/g, ' ').trim()}`
+    })
+    .join('\n')
 }
 
-function walkNodes(nodes: MarkdownNode[], walk: Walk): void {
+function walkNodes(nodes: MarkdownNode[], walk: Walk, list?: OrphanListContext): void {
   let index = 0
   while (index < nodes.length) {
     const node = nodes[index]!
@@ -238,7 +256,7 @@ function walkNodes(nodes: MarkdownNode[], walk: Walk): void {
         break
       }
       flush(walk)
-      const block = orphansToMarkdown(kind, group)
+      const block = orphansToMarkdown(kind, group, list)
       if (block) {
         walk.blocks.push(block)
       }
@@ -277,11 +295,12 @@ function walkNode(node: MarkdownNode, walk: Walk): void {
  * The selection fragment as markdown. A selection inside one paragraph comes back as the
  * plain text it looks like (math spans as their `$…$`); anything structural comes back as
  * source a markdown editor will re-render — including a selection whose table or list
- * root the range clone left behind.
+ * root the range clone left behind. `list` is that lost root's context, when the caller
+ * could read it off the live selection — it only affects top-level orphaned `li` runs.
  */
-export function nodesToMarkdown(nodes: ArrayLike<MarkdownNode>): string {
+export function nodesToMarkdown(nodes: ArrayLike<MarkdownNode>, list?: OrphanListContext): string {
   const walk: Walk = { blocks: [], inline: [] }
-  walkNodes(Array.from(nodes), walk)
+  walkNodes(Array.from(nodes), walk, list)
   flush(walk)
   return walk.blocks.join('\n\n')
 }

@@ -60,6 +60,15 @@ services:
     command: >
       sh -c "alembic upgrade head &&
       uvicorn sightread.main:app --host 0.0.0.0 --port 8000"
+    # Healthy only once /healthz answers — which is only after `alembic upgrade head`
+    # finished and uvicorn is serving. The worker gates on this, so it can never claim a
+    # queued job against a schema the migration has not written yet.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
 
   worker:
     build:
@@ -74,8 +83,11 @@ services:
     depends_on:
       pg:
         condition: service_healthy
+      # service_healthy, not service_started: started only means the container exists,
+      # and a worker that claims a job mid-migration bills the user and then fails on
+      # the missing column.
       api:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - uploads:/data/uploads
       - figures:/data/figures
