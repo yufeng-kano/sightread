@@ -176,3 +176,85 @@ describe('cellGroupsToMarkdown', () => {
     )
   })
 })
+
+describe('rendered inline markdown', () => {
+  it('hands back emphasis, code and <br> from data-src', () => {
+    const cell = el('td', {}, [
+      el('strong', { 'data-src': '**96.5**' }, [text('96.5')]),
+      text(' '),
+      el('br', { 'data-src': '<br>' }),
+      el('code', { class: 'md-inline-code', 'data-src': '`uv sync`' }, [text('uv sync')]),
+    ])
+    const row = el('tr', {}, [cell])
+
+    expect(nodesToMarkdown([el('table', {}, [row])])).toBe(
+      ['| **96.5** <br>`uv sync` |', '| --- |'].join('\n'),
+    )
+  })
+
+  it('hands back a KaTeX display block from its data-md', () => {
+    const block = el('div', { class: 'md-math-block', 'data-md': '$$\nx = 1\n$$' }, [
+      text('x=1'),
+    ])
+
+    expect(nodesToMarkdown([block])).toBe('$$\nx = 1\n$$')
+  })
+})
+
+describe('partially selected styled elements', () => {
+  it('re-wraps only the cloned children when a boundary cuts through', () => {
+    const cut = el('strong', { 'data-src': '**96.5**' }, [text('6.5')])
+
+    expect(nodesToMarkdown([el('p', { class: 'md-p' }, [cut, text(' result')])])).toBe(
+      '**6.5** result',
+    )
+  })
+
+  it('drops an element cloned empty at the selection edge', () => {
+    const empty = el('em', { 'data-src': '*note*' }, [])
+
+    expect(nodesToMarkdown([el('p', { class: 'md-p' }, [empty, text('after')])])).toBe('after')
+  })
+})
+
+describe('display math cut by a selection boundary', () => {
+  const source = '$$\nx = 1\n$$'
+
+  function mathBlock(id: string, glyphs: string) {
+    return el('div', { class: 'md-math-block', 'data-md': source, 'data-md-id': id }, [
+      el('span', { class: 'katex' }, [
+        el('span', { class: 'katex-mathml' }, [text('x=1 mathml mirror')]),
+        el('span', { class: 'katex-html' }, [text(glyphs)]),
+      ]),
+    ])
+  }
+
+  it('copies only the surviving glyph text when the block is named partial', () => {
+    expect(nodesToMarkdown([mathBlock('m1', '= 1')], undefined, new Set(['m1']))).toBe('= 1')
+  })
+
+  it('still hands back the full source when the block was swallowed whole', () => {
+    expect(nodesToMarkdown([mathBlock('m1', 'x = 1')])).toBe(source)
+  })
+
+  it('downgrades only the cut twin of a repeated formula', () => {
+    const cut = mathBlock('m1', '= 1')
+    const whole = mathBlock('m2', 'x = 1')
+
+    expect(nodesToMarkdown([cut, whole], undefined, new Set(['m1']))).toBe(
+      ['= 1', source].join('\n\n'),
+    )
+  })
+})
+
+describe('whitespace inside restored code spans', () => {
+  it('keeps repeated spaces in an inline code span through block normalization', () => {
+    const paragraph = el('p', { class: 'md-p' }, [
+      text('run   '),
+      el('code', { class: 'md-inline-code', 'data-src': '`a  b`' }, [text('a  b')]),
+      text('   now'),
+    ])
+
+    expect(nodesToMarkdown([paragraph])).toBe('run `a  b` now')
+  })
+})

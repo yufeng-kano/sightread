@@ -21,6 +21,7 @@ from sightread.auth.crypto import encrypt_openrouter_key
 from sightread.db.models import Job, OpenRouterKey, UsageLog
 from sightread.jobs.queue import claim_next_job
 from sightread.jobs.runner import run_job
+from sightread.parsing.profiles import PIPELINE_VERSION
 from sightread.upstream.openrouter import CHAT_URL
 from tests.conftest import CSRF_HEADERS, DATABASE_URL, TEST_SECRET_KEY
 from tests.test_jobs_queue import postgres_only
@@ -132,7 +133,7 @@ async def test_parse_a_mixed_pdf_end_to_end(api_client, sessionmaker, documents)
         "model": MODEL,
         "profile": None,
         "bbox_format": "yxyx_norm1000",
-        "pipeline_version": 3,
+        "pipeline_version": PIPELINE_VERSION,
         "sha256": result["meta"]["sha256"],
         "cached": False,
     }

@@ -5,7 +5,9 @@ export default defineNuxtConfig({
   modules: ['@nuxtjs/i18n', '@nuxt/eslint'],
   compatibilityDate: '2025-08-20',
   devtools: { enabled: false },
-  css: ['~/assets/css/main.css'],
+  // KaTeX's stylesheet ships with the package (fonts bundled by the build) — the result
+  // viewer's math depends on nothing remote (docs/web.md § Result viewer).
+  css: ['~/assets/css/main.css', 'katex/dist/katex.min.css'],
 
   app: {
     head: {

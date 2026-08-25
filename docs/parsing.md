@@ -35,6 +35,7 @@ Markers are how a caller maps any passage back to its page (citations, cross-che
 - Figures: `bbox` = `[ymin, xmin, ymax, xmax]`, normalized 0–1000, origin top-left (`yxyx_norm1000`, Gemini-native — prompt the model for this format explicitly).
 - The service **never converts coordinates**; the response declares `meta.bbox_format` and the receiver does the one and only conversion at crop time.
 - Placeholder: `![fig{n}](sightread://p{page}/{ymin},{xmin},{ymax},{xmax})`, caption verbatim on the next line.
+- The box bounds the graphic itself — the plotted area, drawing or photograph — and **excludes the caption line and surrounding body text**. The caption already travels on the placeholder's next line, so a box that included it would print it twice: once baked into the crop, once as text. The prompt states this explicitly.
 - Figure ids are document-wide (`fig1`, `fig2`, …) and the page number is **ours**, not the model's: the model emits the placeholder in place and the assembler renumbers it. Boxes are clamped to 0–1000; a box that is still degenerate (zero or negative area) is dropped, never guessed at.
 
 ## Figure crops
@@ -43,7 +44,7 @@ The page image a vision call already rendered is also where figures are cropped 
 
 - After a page transcribes, every placeholder in that page's markdown is cropped from the rendered PNG with Pillow (raster work on our own render — not PDF work, so the Poppler-only rule is untouched) and written to `FIGURES_DIR/{job_id}/p{page}_{ymin}_{xmin}_{ymax}_{xmax}.png`.
 - The filename is the cleaned bbox under **our** page number — the same clamping and renumbering `assemble` applies — so a crop is addressable from any placeholder without waiting for document-wide figure ids.
-- Crops get a 2% margin per side (the same margin the API docs tell callers to add), clamped to the page.
+- Crops get a 0.8% margin per side (8 bbox units), clamped to the page — enough to forgive a slightly tight box, small enough not to pull the caption the prompt just excluded back into the crop. (The API docs suggest self-cropping callers add ~2% when they prefer safety over tightness; that is their trade to make.)
 - A crop that fails is logged and skipped; it never fails the page. A figure whose crop is missing (old results, failed crop) simply renders as a placeholder in the viewer.
 - Writes are atomic (encode to a staging name, rename): a partial result can point the viewer at a crop mid-encode, and an existing name must never stream as a truncated PNG. The figure routes answer with `Cache-Control: private, no-store` — a browser cache keys on the URL, not the session, and a cached crop must not outlive a sign-out.
 - At most `FIGURES_PER_PAGE_MAX` (default 40) crops per page, in reading order; the excess is logged and skipped. The upstream response body is already capped, but a malicious or malfunctioning user-defined endpoint could otherwise turn one small response into unbounded PNG encodes and durable disk under the shared figures volume.

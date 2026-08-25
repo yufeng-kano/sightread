@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 Bbox = tuple[int, int, int, int]
 
-# Margin per side in bbox space: 2% of the page, the same margin the API docs tell
-# self-cropping callers to add (docs/api.md).
-CROP_MARGIN = 20
+# Margin per side in bbox space: 0.8% of the page. Enough to forgive a slightly tight
+# box; a wider margin (the ~2% docs/api.md suggests to self-cropping callers) would pull
+# the caption the prompt excludes right back into the crop (docs/parsing.md).
+CROP_MARGIN = 8
 
 # A bbox as the figure routes receive it: `120,60,480,940`.
 _BBOX_PATH_RE = re.compile(r"^(-?\d{1,5}),(-?\d{1,5}),(-?\d{1,5}),(-?\d{1,5})$")

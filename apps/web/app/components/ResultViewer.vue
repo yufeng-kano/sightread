@@ -259,12 +259,37 @@ function tableRegionMarkdown(selection: Selection): string | null {
   return cellGroupsToMarkdown([...rows.values()])
 }
 
+/**
+ * Display-math blocks a selection boundary sits inside. `cloneContents` keeps such a
+ * block's element — and its full `data-md` — over truncated KaTeX children, so the
+ * serializer must not trust the source for these blocks and copies their surviving glyph
+ * text instead. A block the selection swallowed whole leaves both boundaries outside it
+ * and is not collected here. Blocks are named by their per-occurrence `data-md-id`, not
+ * their source — a document can repeat a formula, and a boundary in one twin must not
+ * downgrade the other.
+ */
+function partialMathBlocks(selection: Selection): Set<string> {
+  const partial = new Set<string>()
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index)
+    for (const container of [range.startContainer, range.endContainer]) {
+      const element = container instanceof Element ? container : container.parentElement
+      const id = element?.closest('.md-math-block')?.getAttribute('data-md-id')
+      if (id) {
+        partial.add(id)
+      }
+    }
+  }
+  return partial
+}
+
 /** Ctrl+C inside the document copies markdown, tables included (docs/web.md). */
 function onCopy(event: ClipboardEvent) {
   const selection = window.getSelection()
   if (!selection || selection.isCollapsed || !event.clipboardData) {
     return
   }
+  const partialMath = partialMathBlocks(selection)
   const region = tableRegionMarkdown(selection)
   const fragments: string[] = []
   if (region) {
@@ -281,7 +306,24 @@ function onCopy(event: ClipboardEvent) {
         fragments.push(range.toString())
         continue
       }
-      const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
+      // A selection wholly inside one KaTeX block never reaches the serializer's
+      // `data-md` (the clone drops the block root): selecting every visible glyph is
+      // the whole formula and copies as its `$$…$$` source; anything less copies as
+      // the glyph text it looks like.
+      const mathBlock = element?.closest('.md-math-block')
+      if (mathBlock) {
+        const glyphs = mathBlock.querySelector('.katex-html')?.textContent ?? ''
+        const covered =
+          range.toString().replace(/\s+/g, ' ').trim() === glyphs.replace(/\s+/g, ' ').trim()
+        const source = mathBlock.getAttribute('data-md')
+        fragments.push(covered && source ? source : range.toString())
+        continue
+      }
+      const markdown = nodesToMarkdown(
+        range.cloneContents().childNodes,
+        orphanListContext(range),
+        partialMath,
+      )
       if (markdown) {
         fragments.push(markdown)
       }
@@ -403,8 +445,9 @@ const failedPages = computed(() => props.result?.errors ?? [])
                 </h4>
                 <p v-else-if="block.kind === 'p'" class="md-p"><MdInline :text="block.text" /></p>
 
-                <!-- Whitespace preserved: the line breaks are the formula. -->
-                <pre v-else-if="block.kind === 'math'" class="md-math">{{ block.text }}</pre>
+                <!-- KaTeX-typeset, falling back to the verbatim source when it cannot
+                     parse (docs/web.md § Result viewer). -->
+                <MdMath v-else-if="block.kind === 'math'" :tex="block.text" />
 
                 <pre
                   v-else-if="block.kind === 'code'"
@@ -657,7 +700,11 @@ const failedPages = computed(() => props.result?.errors ?? [])
   padding: 0 var(--space-10) var(--space-12);
 }
 
+/* The reading measure is the page, centered in the pane — on a wide dialog the text sits
+   in the middle rather than hugging the rail (docs/web.md § Result viewer). */
 .page {
+  max-width: 60ch;
+  margin-inline: auto;
   padding: var(--space-7) 0 var(--space-1);
   border-top: 1px solid var(--line);
 }
@@ -824,16 +871,20 @@ const failedPages = computed(() => props.result?.errors ?? [])
   max-width: 60ch;
 }
 
-/* Inline math keeps the body's colour; the serif face is what marks it as notation. */
-.prose :deep(.md-inline-math) {
-  font-family: var(--font-display);
-  font-style: italic;
+/* KaTeX brings its own faces and sizing; the span only needs to not fight the line. */
+.prose :deep(.md-inline-math .katex) {
+  font-size: 1.06em;
 }
 
-.prose :deep(.md-inline-math sup),
-.prose :deep(.md-inline-math sub) {
-  font-style: normal;
-  line-height: 1;
+/* An inline code span: the mono face on the sunken surface, sized to sit in the line.
+   `pre-wrap`, because its spaces are content — `a  b` must read as it copies. */
+.prose :deep(.md-inline-code) {
+  padding: 1px var(--space-1);
+  border-radius: var(--radius);
+  background: var(--paper-sunken);
+  font-family: var(--mono);
+  font-size: 0.9em;
+  white-space: pre-wrap;
 }
 
 /* --- JSON view ------------------------------------------------------------ */

@@ -40,6 +40,19 @@ function tag(node: MarkdownNode): string {
   return (node.tagName ?? '').toLowerCase()
 }
 
+/**
+ * Collapses runs of whitespace into one space and trims — except inside `` `code` ``
+ * spans, whose spaces are content: `` `a  b` `` restored from `data-src` must not lose
+ * its double space to the surrounding block's normalization.
+ */
+function collapseWhitespace(text: string): string {
+  return text
+    .split(/(`[^`\n]*`)/)
+    .map((part, index) => (index % 2 ? part : part.replace(/\s+/g, ' ')))
+    .join('')
+    .trim()
+}
+
 /** Inline content: text runs plus math spans, which come back as their `data-tex`. */
 function inlineText(node: MarkdownNode): string {
   if (node.nodeType === TEXT_NODE) {
@@ -52,12 +65,49 @@ function inlineText(node: MarkdownNode): string {
   if (tex !== null) {
     return tex
   }
+  // Rendered emphasis, code and <br> carry their exact markdown source (docs/web.md).
+  const src = attribute(node, 'data-src')
+  if (src !== null) {
+    return inlineSource(node, src)
+  }
   return children(node).map(inlineText).join('')
+}
+
+/**
+ * A styled element's markdown. `data-src` is the exact source — but a selection boundary
+ * can cut through the element: `cloneContents` then keeps the element (and its full
+ * attribute) over truncated children, and handing back the whole source would claim text
+ * the user did not select. So the source is trusted only when the children still serialize
+ * to exactly what sits between its markers; a partial clone re-wraps what actually
+ * survived. Nested styling still round-trips, because nested elements carry `data-src` of
+ * their own.
+ */
+function inlineSource(node: MarkdownNode, src: string): string {
+  const name = tag(node)
+  let marker: string
+  if (name === 'strong') {
+    marker = src.startsWith('__') ? '__' : '**'
+  } else if (name === 'em') {
+    marker = src.startsWith('_') ? '_' : '*'
+  } else if (name === 'code') {
+    marker = '`'
+  } else {
+    // <br> has no children to lose — its source is its source.
+    return src
+  }
+  const inner = children(node).map(inlineText).join('')
+  // A boundary sitting exactly on the element's edge clones it empty — markers around
+  // nothing are not markdown, they are noise.
+  if (!inner) {
+    return ''
+  }
+  const expected = src.slice(marker.length, src.length - marker.length)
+  return inner === expected ? src : `${marker}${inner}${marker}`
 }
 
 /** A table cell's markdown: inline content with its pipes escaped, on one line. */
 function cellText(node: MarkdownNode): string {
-  return inlineText(node).replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|')
+  return collapseWhitespace(inlineText(node)).replace(/\|/g, '\\|')
 }
 
 function tableRows(node: MarkdownNode): MarkdownNode[] {
@@ -112,7 +162,7 @@ function listToMarkdown(node: MarkdownNode): string {
   return items
     .map((item, index) => {
       const marker = ordered ? `${start + index}.` : '-'
-      return `${marker} ${inlineText(item).replace(/\s+/g, ' ').trim()}`
+      return `${marker} ${collapseWhitespace(inlineText(item))}`
     })
     .join('\n')
 }
@@ -130,10 +180,39 @@ function codeToMarkdown(node: MarkdownNode): string {
   return `$$\n${node.textContent ?? ''}\n$$`
 }
 
+/** A KaTeX clone's visible glyph text — the `.katex-html` layer when present, so the
+ *  invisible MathML mirror does not double every character into the copy. */
+function renderedMathText(node: MarkdownNode): string {
+  const html = findByClass(node, 'katex-html')
+  return (((html ?? node).textContent ?? '')).replace(/\s+/g, ' ').trim()
+}
+
+function findByClass(node: MarkdownNode, name: string): MarkdownNode | null {
+  if (node.nodeType === ELEMENT_NODE && classes(node).includes(name)) {
+    return node
+  }
+  for (const child of children(node)) {
+    const found = findByClass(child, name)
+    if (found) {
+      return found
+    }
+  }
+  return null
+}
+
 /** One block element's markdown, or null to fall through to its children. */
-function blockToMarkdown(node: MarkdownNode): string | null {
+function blockToMarkdown(node: MarkdownNode, partialBlocks?: ReadonlySet<string>): string | null {
   const source = attribute(node, 'data-md')
   if (source !== null) {
+    // A display-math block a selection boundary sits inside arrives as its element —
+    // full `data-md` over truncated KaTeX children — and handing back the source would
+    // claim formula content outside the selection. The caller names those blocks from
+    // the live selection by their per-occurrence `data-md-id` (a repeated formula's
+    // twins share one source); for them the surviving glyph text is the copy.
+    const id = attribute(node, 'data-md-id')
+    if (id !== null && partialBlocks?.has(id)) {
+      return renderedMathText(node)
+    }
     return source
   }
   const names = classes(node)
@@ -157,7 +236,7 @@ function blockToMarkdown(node: MarkdownNode): string | null {
     case 'pre':
       return codeToMarkdown(node)
     case 'p':
-      return inlineText(node).replace(/\s+/g, ' ').trim()
+      return collapseWhitespace(inlineText(node))
     default:
       return null
   }
@@ -179,10 +258,12 @@ function isInline(node: MarkdownNode): boolean {
 interface Walk {
   blocks: string[]
   inline: string[]
+  /** `data-md` sources of display-math blocks a live selection boundary cut through. */
+  partialBlocks?: ReadonlySet<string>
 }
 
 function flush(walk: Walk): void {
-  const text = walk.inline.join('').replace(/\s+/g, ' ').trim()
+  const text = collapseWhitespace(walk.inline.join(''))
   if (text) {
     walk.blocks.push(text)
   }
@@ -241,7 +322,7 @@ function orphansToMarkdown(
   return group
     .map((item, index) => {
       const marker = list?.ordered ? `${list.start + index}.` : '-'
-      return `${marker} ${inlineText(item).replace(/\s+/g, ' ').trim()}`
+      return `${marker} ${collapseWhitespace(inlineText(item))}`
     })
     .join('\n')
 }
@@ -290,7 +371,7 @@ function walkNode(node: MarkdownNode, walk: Walk): void {
   if (node.nodeType !== ELEMENT_NODE) {
     return
   }
-  const block = blockToMarkdown(node)
+  const block = blockToMarkdown(node, walk.partialBlocks)
   if (block !== null) {
     flush(walk)
     if (block) {
@@ -310,9 +391,16 @@ function walkNode(node: MarkdownNode, walk: Walk): void {
  * source a markdown editor will re-render — including a selection whose table or list
  * root the range clone left behind. `list` is that lost root's context, when the caller
  * could read it off the live selection — it only affects top-level orphaned `li` runs.
+ * `partialBlocks` names the display-math blocks a selection boundary sits inside (again
+ * read off the live selection): their `data-md` would claim unselected formula content,
+ * so they copy as the glyph text the clone actually carries.
  */
-export function nodesToMarkdown(nodes: ArrayLike<MarkdownNode>, list?: OrphanListContext): string {
-  const walk: Walk = { blocks: [], inline: [] }
+export function nodesToMarkdown(
+  nodes: ArrayLike<MarkdownNode>,
+  list?: OrphanListContext,
+  partialBlocks?: ReadonlySet<string>,
+): string {
+  const walk: Walk = { blocks: [], inline: [], partialBlocks }
   walkNodes(Array.from(nodes), walk, list)
   flush(walk)
   return walk.blocks.join('\n\n')
