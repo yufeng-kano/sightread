@@ -272,6 +272,15 @@ function onCopy(event: ClipboardEvent) {
   } else {
     for (let index = 0; index < selection.rangeCount; index += 1) {
       const range = selection.getRangeAt(index)
+      // A selection confined to a code or math block copies verbatim: the clone is a bare
+      // text node whose whitespace the serializer would collapse, and in a <pre> the line
+      // breaks and indentation are the content.
+      const container = range.commonAncestorContainer
+      const element = container instanceof Element ? container : container.parentElement
+      if (element?.closest('pre')) {
+        fragments.push(range.toString())
+        continue
+      }
       const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
       if (markdown) {
         fragments.push(markdown)
@@ -336,20 +345,24 @@ const failedPages = computed(() => props.result?.errors ?? [])
       />
 
       <div v-else class="markdown" :class="{ degraded: failedPages.length > 0 || partial }">
-        <!-- Spans both columns: it is a fact about the document, not about one page. -->
-        <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
-          {{
-            t('viewer.degraded', {
-              count: failedPages.length,
-              pages: failedPages.map((entry) => entry.page).join(', '),
-            })
-          }}
-        </UiBanner>
-        <!-- Same slot as the degraded note: the parse is still running, pages below are
-             what exists so far (docs/api.md § Partial results). -->
-        <div v-else-if="partial" class="parsing-note">
-          <UiSpinner />
-          <span>{{ progress }}</span>
+        <!-- Spans both columns: facts about the whole document, not about one page. Both
+             can hold at once — a page can fail while the rest is still parsing, and the
+             failure must not silence the live progress. -->
+        <div v-if="failedPages.length || partial" class="doc-notes">
+          <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
+            {{
+              t('viewer.degraded', {
+                count: failedPages.length,
+                pages: failedPages.map((entry) => entry.page).join(', '),
+              })
+            }}
+          </UiBanner>
+          <!-- The parse is still running; pages below are what exists so far
+               (docs/api.md § Partial results). -->
+          <div v-if="partial" class="parsing-note">
+            <UiSpinner />
+            <span>{{ progress }}</span>
+          </div>
         </div>
 
         <nav class="page-rail" :aria-label="t('viewer.pagesLabel')">
@@ -560,15 +573,17 @@ const failedPages = computed(() => props.result?.errors ?? [])
   grid-template-rows: auto minmax(0, 1fr);
 }
 
-.degraded-note {
+.doc-notes {
   grid-column: 1 / -1;
+}
+
+.degraded-note {
   border-inline: none;
   border-top: none;
 }
 
-/* Same slot as the degraded note: a fact about the whole document — it is still growing. */
+/* A fact about the whole document — it is still growing. */
 .parsing-note {
-  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: var(--space-2);

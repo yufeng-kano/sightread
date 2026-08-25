@@ -590,7 +590,11 @@ def figure_crop_response(settings: AppSettings, job: Job, page: int, bbox: str) 
     path = crop_path(Path(settings.figures_dir), job.id, page, cleaned)
     if not path.is_file():
         raise ApiError(404, "invalid_request", "No crop is stored for this figure")
-    return FileResponse(path, media_type="image/png")
+    # Never cached: browser caches key on the URL, not the session, so a cached crop
+    # would outlive a sign-out and answer the next account in the same browser profile.
+    return FileResponse(
+        path, media_type="image/png", headers={"Cache-Control": "private, no-store"}
+    )
 
 
 @router.get("/documents/{document_id}/figures/{page}/{bbox}")

@@ -117,7 +117,12 @@ def save_page_figures(
                 if right <= left or bottom <= top:
                     continue
                 destination = job_dir / f"p{page}_{y_min}_{x_min}_{y_max}_{x_max}.png"
-                image.crop((left, top, right, bottom)).save(destination, format="PNG")
+                # Encode to a temporary name and rename: a partial result can point the
+                # viewer at this crop while it is still being written, and a name that
+                # exists must never stream as a truncated PNG.
+                staging = destination.with_name(destination.name + ".writing")
+                image.crop((left, top, right, bottom)).save(staging, format="PNG")
+                staging.replace(destination)
                 saved += 1
     except OSError:
         # Which figure failed is diagnostic; what the page shows is not logged.

@@ -531,6 +531,12 @@ async def run_job(
             logger.info(
                 "job %s dropped %d unusable figure boxes", job_id, document.dropped_figures
             )
+        # Set before the commit below, deliberately: a SIGTERM can land after PostgreSQL
+        # has durably committed the result but before this coroutine resumes, and a
+        # committed result must keep its crops. The trade is the right way round — if the
+        # commit itself failed, the crops leak (bounded, harmless) instead of a succeeded
+        # job losing its images.
+        succeeded = True
         await _finish(
             sessionmaker,
             job_id,
@@ -564,7 +570,6 @@ async def run_job(
                 },
             },
         )
-        succeeded = True
     finally:
         if not succeeded:
             # Whatever ended this run without a result — a failure above, or the worker
