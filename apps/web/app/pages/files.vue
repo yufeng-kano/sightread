@@ -317,8 +317,10 @@ async function fetchResult(document: LibraryDocument) {
   }
   loadingResults.add(document.id)
   resultErrors.delete(document.id)
+  let fetched: JobResult | null = null
   try {
-    results.set(document.id, await getDocumentResult(document.id))
+    fetched = await getDocumentResult(document.id)
+    results.set(document.id, fetched)
   } catch (error) {
     resultErrors.set(document.id, await resolve(error))
   } finally {
@@ -327,9 +329,10 @@ async function fetchResult(document: LibraryDocument) {
   // The parse can finish while a partial request is in flight: the watcher's final fetch
   // was swallowed by the in-flight guard, and with nothing left pending the poll has
   // stopped — so nothing else will ask again. Recheck the row this response landed on.
-  const held = results.get(document.id)
+  // Only after a *successful partial* response: a failed request retrying here would be
+  // an unbounded loop against a route that answers the same error every time.
   const row = documents.value.find((entry) => entry.id === document.id)
-  if (held?.meta.partial && row && !isPending(row)) {
+  if (fetched?.meta.partial && row && !isPending(row)) {
     void fetchResult(row)
   }
 }
@@ -365,8 +368,12 @@ watch(documents, (list) => {
   openDocument.value = fresh
   const held = results.get(fresh.id)
   // A failed fetch is not retried on every list change — reopening the document retries.
-  const missing = !held && !resultErrors.has(fresh.id)
-  if (isPending(fresh) || held?.meta.partial || missing) {
+  // The same guard covers a held partial over a terminal row (a failed job answers 404
+  // forever); a still-pending row retries freely, since each attempt clears the error.
+  const failed = resultErrors.has(fresh.id)
+  const missing = !held && !failed
+  const stalePartial = held?.meta.partial === true && !failed
+  if (isPending(fresh) || stalePartial || missing) {
     void fetchResult(fresh)
   }
 })

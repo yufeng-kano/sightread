@@ -93,6 +93,18 @@ function tableToMarkdown(node: MarkdownNode): string {
   return rowsToMarkdown(tableRows(node))
 }
 
+/**
+ * One pipe table from cells the caller has already grouped into rows — Firefox reports a
+ * table-region selection as one range per cell, and serializing each range alone would
+ * make every cell its own one-column table. The copy handler groups the live cells by
+ * their row and hands them here.
+ */
+export function cellGroupsToMarkdown(rows: MarkdownNode[][]): string {
+  return rowsToMarkdown(
+    rows.map((cells) => ({ nodeType: ELEMENT_NODE, tagName: 'TR', childNodes: cells })),
+  )
+}
+
 function listToMarkdown(node: MarkdownNode): string {
   const ordered = tag(node) === 'ol'
   const start = Number.parseInt(attribute(node, 'start') ?? '1', 10) || 1

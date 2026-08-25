@@ -28,7 +28,7 @@
  */
 import type { ComponentPublicInstance } from 'vue'
 import type { JobResult } from '~/lib/api'
-import { nodesToMarkdown, type OrphanListContext } from '~/lib/copy'
+import { cellGroupsToMarkdown, nodesToMarkdown, type OrphanListContext } from '~/lib/copy'
 import { formatBbox, parseResultMarkdown, type Bbox, type ResultBlock } from '~/lib/markdown'
 
 const props = withDefaults(
@@ -220,19 +220,62 @@ function orphanListContext(range: Range): OrphanListContext | undefined {
   return { ordered: true, start: start + offset }
 }
 
+/**
+ * Firefox reports a table-region selection as one range per selected cell. Serialized
+ * range by range that becomes a stack of one-cell tables, so when every range sits in a
+ * cell of the same table, the live cells are grouped by their row and serialized as the
+ * one table the user actually selected. Any other multi-range selection falls through to
+ * the per-range path.
+ */
+function tableRegionMarkdown(selection: Selection): string | null {
+  if (selection.rangeCount < 2) {
+    return null
+  }
+  const cells: Element[] = []
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const node = selection.getRangeAt(index).startContainer
+    const element = node instanceof Element ? node : node.parentElement
+    const cell = element?.closest('td, th')
+    if (!cell) {
+      return null
+    }
+    cells.push(cell)
+  }
+  const table = cells[0]?.closest('table')
+  if (!table || !cells.every((cell) => cell.closest('table') === table)) {
+    return null
+  }
+  // Ranges arrive in document order, so insertion order groups rows top to bottom.
+  const rows = new Map<Element, Element[]>()
+  for (const cell of cells) {
+    const row = cell.closest('tr')
+    if (!row) {
+      return null
+    }
+    const group = rows.get(row) ?? []
+    group.push(cell)
+    rows.set(row, group)
+  }
+  return cellGroupsToMarkdown([...rows.values()])
+}
+
 /** Ctrl+C inside the document copies markdown, tables included (docs/web.md). */
 function onCopy(event: ClipboardEvent) {
   const selection = window.getSelection()
   if (!selection || selection.isCollapsed || !event.clipboardData) {
     return
   }
+  const region = tableRegionMarkdown(selection)
   const fragments: string[] = []
-  // Firefox hands a table-region selection over as one range per cell.
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    const range = selection.getRangeAt(index)
-    const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
-    if (markdown) {
-      fragments.push(markdown)
+  if (region) {
+    fragments.push(region)
+  } else {
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index)
+      const markdown = nodesToMarkdown(range.cloneContents().childNodes, orphanListContext(range))
+      if (markdown) {
+        fragments.push(markdown)
+      }
     }
   }
   if (!fragments.length) {

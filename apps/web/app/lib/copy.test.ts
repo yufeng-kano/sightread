@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { nodesToMarkdown, type MarkdownNode } from './copy'
+import { cellGroupsToMarkdown, nodesToMarkdown, type MarkdownNode } from './copy'
 
 /** Minimal DOM stand-ins — the serializer reads a structural subset of `Node`. */
 function el(
@@ -159,5 +159,20 @@ describe('nodesToMarkdown on selections that lost their structural root', () => 
     const nodes = [el('li', {}, [text('Review')]), el('li', {}, [text('Submit')])]
 
     expect(nodesToMarkdown(nodes, { ordered: true, start: 5 })).toBe('5. Review\n6. Submit')
+  })
+})
+
+describe('cellGroupsToMarkdown', () => {
+  // Firefox reports a table-region selection as one range per cell; the copy handler
+  // groups the live cells by row and this turns the groups into the one selected table.
+  it('serializes row-grouped cells as one pipe table', () => {
+    const rows = [
+      [el('th', {}, [text('Name')]), el('th', {}, [text('Value')])],
+      [el('td', {}, [text('APAC')]), el('td', {}, [text('1,204')])],
+    ]
+
+    expect(cellGroupsToMarkdown(rows)).toBe(
+      ['| Name | Value |', '| --- | --- |', '| APAC | 1,204 |'].join('\n'),
+    )
   })
 })
