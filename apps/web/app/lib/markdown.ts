@@ -24,8 +24,10 @@
 export type Bbox = [number, number, number, number]
 
 export type ResultBlock =
-  | { kind: 'h2'; text: string }
-  | { kind: 'h3'; text: string }
+  /** `level` is the source depth (`#…` count) — the viewer draws two heading sizes, but a
+   *  copy must hand the original level back (docs/web.md § Result viewer). */
+  | { kind: 'h2'; text: string; level: number }
+  | { kind: 'h3'; text: string; level: number }
   | { kind: 'p'; text: string }
   | { kind: 'list'; ordered: boolean; items: string[]; start?: number }
   | { kind: 'math'; text: string }
@@ -204,9 +206,11 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
 
     const heading = HEADING.exec(line)
     if (heading) {
+      const level = (heading[1] ?? '').length
       page().blocks.push({
-        kind: (heading[1] ?? '').length >= 3 ? 'h3' : 'h2',
+        kind: level >= 3 ? 'h3' : 'h2',
         text: (heading[2] ?? '').trim(),
+        level,
       })
       continue
     }
@@ -436,30 +440,42 @@ function tokenizeMath(tex: string, kind: MathToken['kind'], out: MathToken[]): v
   }
 }
 
-/** A `$…$` span: opens on `$` + non-space, closes on non-space + `$`, and never ends
- *  before a digit — so "$5 and $6" stays two prices, not a formula. */
-const MATH_SPAN = /\$([^$\n]+)\$(?!\d)/g
+/** A `$…$` span anchored at one candidate opener: closes on `$` not followed by a digit —
+ *  so "$5 and $6" stays two prices, not a formula. */
+const MATH_SPAN_AT = /^\$([^$\n]+)\$(?!\d)/
 
 /**
  * Splits one line of prose (a paragraph, heading, list item, table cell or caption) into
  * plain text and rendered math spans.
+ *
+ * Scanned dollar by dollar rather than with one global regex on purpose: a rejected
+ * candidate (a price, a span padded with spaces) resumes just past its *opening* dollar —
+ * a global match would have consumed the next span's opener as its own closer, so
+ * "cost $5 and variable $x$" would lose the real formula.
  */
 export function parseInline(text: string): InlineSegment[] {
   const segments: InlineSegment[] = []
   let cursor = 0
-  MATH_SPAN.lastIndex = 0
-  for (const match of text.matchAll(MATH_SPAN)) {
-    const tex = match[1] ?? ''
-    if (/^\s/.test(tex) || /\s$/.test(tex)) {
+  let scan = 0
+  while (scan < text.length) {
+    const open = text.indexOf('$', scan)
+    if (open === -1) {
+      break
+    }
+    const match = MATH_SPAN_AT.exec(text.slice(open))
+    const tex = match?.[1] ?? ''
+    if (!match || /^\s/.test(tex) || /\s$/.test(tex)) {
+      scan = open + 1
       continue
     }
-    if (match.index > cursor) {
-      segments.push({ kind: 'text', text: text.slice(cursor, match.index) })
+    if (open > cursor) {
+      segments.push({ kind: 'text', text: text.slice(cursor, open) })
     }
     const tokens: MathToken[] = []
     tokenizeMath(tex, 'text', tokens)
     segments.push({ kind: 'math', tex, tokens })
-    cursor = match.index + match[0].length
+    cursor = open + match[0].length
+    scan = cursor
   }
   if (cursor < text.length || segments.length === 0) {
     segments.push({ kind: 'text', text: text.slice(cursor) })

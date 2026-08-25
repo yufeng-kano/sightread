@@ -79,6 +79,15 @@ describe('nodesToMarkdown', () => {
     )
   })
 
+  it('keeps the source heading depth from data-level', () => {
+    const nodes = [
+      el('h3', { class: 'md-h2', 'data-level': '1' }, [text('Top')]),
+      el('h4', { class: 'md-h3', 'data-level': '4' }, [text('Deep')]),
+    ]
+
+    expect(nodesToMarkdown(nodes)).toBe('# Top\n\n#### Deep')
+  })
+
   it('hands a figure back as its stored placeholder source', () => {
     const figure = el(
       'figure',

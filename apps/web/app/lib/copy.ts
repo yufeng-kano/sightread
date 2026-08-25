@@ -129,11 +129,12 @@ function blockToMarkdown(node: MarkdownNode): string | null {
   if (names.includes('page-marker') || names.includes('page-rail')) {
     return ''
   }
-  if (names.includes('md-h2')) {
-    return `## ${inlineText(node).trim()}`
-  }
-  if (names.includes('md-h3')) {
-    return `### ${inlineText(node).trim()}`
+  if (names.includes('md-h2') || names.includes('md-h3')) {
+    // The viewer draws two heading sizes, but the source depth rides on `data-level` —
+    // copying `# Title` must not demote it to `##`, nor `####` promote to `###`.
+    const fallback = names.includes('md-h2') ? 2 : 3
+    const level = Number.parseInt(attribute(node, 'data-level') ?? '', 10) || fallback
+    return `${'#'.repeat(level)} ${inlineText(node).trim()}`
   }
   switch (tag(node)) {
     case 'table':

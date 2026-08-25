@@ -22,11 +22,11 @@ describe('parseResultMarkdown', () => {
 
     expect(pages.map((page) => page.page)).toEqual([1, 2])
     expect(pages[0]!.blocks).toEqual([
-      { kind: 'h2', text: 'Quarterly results' },
+      { kind: 'h2', text: 'Quarterly results', level: 2 },
       { kind: 'p', text: 'Revenue grew across every region, led by APAC.' },
     ])
     expect(pages[1]!.blocks).toEqual([
-      { kind: 'h3', text: 'Notes' },
+      { kind: 'h3', text: 'Notes', level: 3 },
       {
         kind: 'table',
         header: ['Region', 'Revenue'],
@@ -61,7 +61,7 @@ describe('parseResultMarkdown', () => {
 
     expect(pages[0]!.blocks).toEqual([
       { kind: 'fig', id: 'fig1', bbox: [0, 0, 10, 10], caption: null },
-      { kind: 'h2', text: 'Next section' },
+      { kind: 'h2', text: 'Next section', level: 2 },
     ])
   })
 
@@ -71,8 +71,17 @@ describe('parseResultMarkdown', () => {
     expect(pages).toHaveLength(1)
     expect(pages[0]!.page).toBe(1)
     expect(pages[0]!.blocks).toEqual([
-      { kind: 'h2', text: 'Title' },
+      { kind: 'h2', text: 'Title', level: 1 },
       { kind: 'p', text: 'Body.' },
+    ])
+  })
+
+  it('keeps the source heading depth on the two rendered kinds', () => {
+    const pages = parseResultMarkdown(['<!-- page: 1 -->', '# Top', '#### Deep'].join('\n'))
+
+    expect(pages[0]!.blocks).toEqual([
+      { kind: 'h2', text: 'Top', level: 1 },
+      { kind: 'h3', text: 'Deep', level: 4 },
     ])
   })
 
@@ -332,6 +341,15 @@ describe('parseInline', () => {
   it('does not mistake prices for a formula', () => {
     expect(parseInline('costs $5 and $6 total')).toEqual([
       { kind: 'text', text: 'costs $5 and $6 total' },
+    ])
+  })
+
+  it('finds a formula after a rejected price on the same line', () => {
+    const segments = parseInline('cost $5 and variable $x$')
+
+    expect(segments).toEqual([
+      { kind: 'text', text: 'cost $5 and variable ' },
+      { kind: 'math', tex: 'x', tokens: [{ kind: 'text', text: 'x' }] },
     ])
   })
 

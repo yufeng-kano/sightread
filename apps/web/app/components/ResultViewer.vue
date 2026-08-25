@@ -168,6 +168,17 @@ const progress = computed(() => {
  *  placeholder instead of a broken image. */
 const failedCrops = reactive(new Set<string>())
 
+/** A partial result can expose a placeholder a beat before the worker has written its
+ *  crop (billing is persisted first, docs/parsing.md), so its request 404s. Each new
+ *  snapshot forgets past failures and retries — the image appears as soon as the file
+ *  exists, instead of staying hidden until the viewer is reopened. */
+watch(
+  () => props.result,
+  () => {
+    failedCrops.clear()
+  },
+)
+
 function figureKey(page: number, bbox: Bbox): string {
   return `${page}/${bbox.join(',')}`
 }
@@ -328,8 +339,10 @@ const failedPages = computed(() => props.result?.errors ?? [])
             </p>
             <article class="prose">
               <template v-for="(block, index) in page.blocks" :key="index">
-                <h3 v-if="block.kind === 'h2'" class="md-h2"><MdInline :text="block.text" /></h3>
-                <h4 v-else-if="block.kind === 'h3'" class="md-h3">
+                <h3 v-if="block.kind === 'h2'" class="md-h2" :data-level="block.level">
+                  <MdInline :text="block.text" />
+                </h3>
+                <h4 v-else-if="block.kind === 'h3'" class="md-h3" :data-level="block.level">
                   <MdInline :text="block.text" />
                 </h4>
                 <p v-else-if="block.kind === 'p'" class="md-p"><MdInline :text="block.text" /></p>
