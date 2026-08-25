@@ -1,0 +1,74 @@
+"""Figure crop persistence (docs/parsing.md § Figure crops). Pillow only, no services."""
+
+from __future__ import annotations
+
+import uuid
+
+from PIL import Image
+
+from sightread.parsing.figures import (
+    CROP_MARGIN,
+    crop_path,
+    parse_bbox_path,
+    save_page_figures,
+)
+
+
+def _page_image(path, size=(1000, 500), color=(200, 10, 10)):
+    Image.new("RGB", size, color).save(path, format="PNG")
+    return path
+
+
+def test_placeholders_are_cropped_under_our_page_number(tmp_path) -> None:
+    image = _page_image(tmp_path / "page.png")
+    markdown = (
+        "## Heading\n\n"
+        "![fig](sightread://p9/100,100,500,600)\nFigure 1: chart\n\n"
+        "![fig](sightread://p9/700,0,900,1000)\n"
+    )
+
+    saved = save_page_figures(markdown, image, 3, tmp_path / "job")
+
+    assert saved == 2
+    # Named by OUR page number and the cleaned bbox — what the placeholder will carry.
+    first = tmp_path / "job" / "p3_100_100_500_600.png"
+    assert first.is_file()
+    assert (tmp_path / "job" / "p3_700_0_900_1000.png").is_file()
+
+    with Image.open(first) as crop:
+        # bbox space is 0-1000 of each page edge; the crop carries a margin per side,
+        # clamped to the page. Width: (600-100+2*margin)/1000 of 1000px.
+        assert crop.size[0] == (500 + 2 * CROP_MARGIN)
+        # Height: (500-100+2*margin)/1000 of 500px.
+        assert crop.size[1] == round((400 + 2 * CROP_MARGIN) / 1000 * 500)
+
+
+def test_degenerate_and_absent_boxes_save_nothing(tmp_path) -> None:
+    image = _page_image(tmp_path / "page.png")
+    assert save_page_figures("no figures here", image, 1, tmp_path / "job") == 0
+    degenerate = "![fig](sightread://p1/500,500,100,100)"
+    assert save_page_figures(degenerate, image, 1, tmp_path / "job") == 0
+    assert not (tmp_path / "job").exists()
+
+
+def test_a_missing_image_is_swallowed(tmp_path) -> None:
+    saved = save_page_figures(
+        "![fig](sightread://p1/0,0,500,500)", tmp_path / "gone.png", 1, tmp_path / "job"
+    )
+    assert saved == 0
+
+
+def test_bbox_paths_parse_and_clean() -> None:
+    assert parse_bbox_path("100,200,300,400") == (100, 200, 300, 400)
+    # Clamped into 0-1000 like every stored bbox.
+    assert parse_bbox_path("-5,0,2000,1000") == (0, 0, 1000, 1000)
+    assert parse_bbox_path("500,500,100,100") is None  # degenerate after cleaning
+    assert parse_bbox_path("1,2,3") is None
+    assert parse_bbox_path("a,b,c,d") is None
+    assert parse_bbox_path("1,2,3,4,5") is None
+
+
+def test_crop_path_is_deterministic(tmp_path) -> None:
+    job_id = uuid.uuid4()
+    path = crop_path(tmp_path, job_id, 2, (10, 20, 30, 40))
+    assert path == tmp_path / str(job_id) / "p2_10_20_30_40.png"

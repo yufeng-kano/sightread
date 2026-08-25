@@ -57,7 +57,9 @@ const columns = computed<TableColumn<JobSummary>[]>(() => [
 
 async function showResult(job: JobSummary) {
   openJob.value = job
-  if (results.has(job.job_id) || inFlight.has(job.job_id)) {
+  // A held partial snapshot is stale by definition — reopening re-reads it.
+  const held = results.get(job.job_id)
+  if ((held && !held.meta.partial) || inFlight.has(job.job_id)) {
     return
   }
   inFlight.add(job.job_id)
@@ -160,13 +162,17 @@ async function showResult(job: JobSummary) {
         </UiDataTable>
       </UiPanel>
     </UiRegion>
+    <!-- A running job answers with its finished pages — a static snapshot here, since this
+         page does not poll; reopening refreshes it (docs/api.md § Partial results). -->
     <ResultViewer
       v-if="openJob"
+      :key="openJob.job_id"
       :title="openJob.filename"
       :error="openJob.error"
       :result="results.get(openJob.job_id) ?? null"
       :pending="inFlight.has(openJob.job_id)"
       :error-message="resultErrors.get(openJob.job_id) ?? null"
+      :figure-base="`/api/jobs/${openJob.job_id}/figures`"
       @close="openJob = null"
     />
   </UiScreen>

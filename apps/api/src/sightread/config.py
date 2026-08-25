@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     vision_concurrency_per_job: int = 8
     render_workers: int = 0  # 0 means "CPU count", resolved by the worker
     upload_dir: str = "/data/uploads"
+    # Stored figure crops, kept with the result — outside the upload dir on purpose, so the
+    # sweeper never touches them (docs/parsing.md § Figure crops).
+    figures_dir: str = "/data/figures"
     # Cap on a user's custom system prompt (docs/api.md § Limits).
     system_prompt_max_chars: int = 8000
     # Cap on any upstream response body — a user-controlled endpoint must not be able to

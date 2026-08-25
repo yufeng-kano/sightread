@@ -7,9 +7,9 @@ Hosted, multi-user **vision document parsing** service. Users sign in with Googl
 | Doc | Summary |
 |-----|---------|
 | [product.md](./product.md) | Goals, non-goals, origin spec deviations, tenants |
-| [api.md](./api.md) | REST data plane (`/v1/*`), control plane (`/api/*`), SSE, limits, errors |
+| [api.md](./api.md) | REST data plane (`/v1/*`), control plane (`/api/*`), partial results, figure crop routes, SSE, limits, errors |
 | [auth.md](./auth.md) | Google OIDC sessions, hashed API keys, encrypted OpenRouter keys, OAuth 2.1 AS for Claude Connectors, single-use upload tickets |
-| [parsing.md](./parsing.md) | Poppler rendering, vision-only conversion, page markers, bbox contract, prompts, profiles, image normalization |
+| [parsing.md](./parsing.md) | Poppler rendering, vision-only conversion, page markers, bbox contract, figure crop persistence, prompts, profiles, image normalization |
 | [jobs.md](./jobs.md) | PG job queue (SKIP LOCKED), concurrency caps, SSE progress, dedup cache, file retention |
 | [database.md](./database.md) | PostgreSQL schema, Alembic migrations, secrets handling |
 | [mcp.md](./mcp.md) | One `parse` tool minting upload tickets + curl commands, streamable HTTP, Claude Connectors flow |

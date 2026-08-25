@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from ..config import Settings
 from ..db.models import Job, JobPage, Result, UsageLog, utcnow
 from ..parsing import poppler
+from ..parsing.figures import save_page_figures
 from ..parsing.images import ImageError, normalize_image
 from ..parsing.markdown import PageMarkdown, assemble
 from ..parsing.profiles import transcription_prompt_template
@@ -110,6 +111,9 @@ class RunState:
     # UPSTREAM_RESPONSE_MAX_BYTES, carried here so page tasks need no Settings.
     max_response_bytes: int = 33_554_432
     payment_failures: int = 0
+    # This job's own directory under FIGURES_DIR; None turns crop persistence off
+    # (docs/parsing.md § Figure crops).
+    figures_dir: Path | None = None
 
 
 def result_payload(result: Result) -> dict:
@@ -120,6 +124,41 @@ def result_payload(result: Result) -> dict:
         "figures": result.figures,
         "errors": result.errors,
         "meta": result.meta,
+    }
+
+
+def partial_result_payload(job: Job, rows: list[JobPage]) -> dict:
+    """A running job's finished pages, in the result's own shape (docs/api.md § Partial).
+
+    The stored per-page markdown goes through the same `assemble` the final result gets —
+    markers, renumbered placeholders, cleaned boxes. Figure ids are per-snapshot: a page
+    finishing out of order renumbers them, which is why nothing may cache this payload.
+    `pages` carries only what is known so far — no page dimensions, which only the final
+    outcome holds.
+    """
+    finished = [row for row in rows if not row.error and row.markdown]
+    document = assemble(
+        [PageMarkdown(page=row.page_no, markdown=row.markdown or "") for row in finished]
+    )
+    return {
+        "markdown": document.markdown,
+        "pages": [
+            {"page": row.page_no, "method": row.method, "error": row.error} for row in rows
+        ],
+        "figures": document.figures,
+        "errors": [{"page": row.page_no, "reason": row.error} for row in rows if row.error],
+        "meta": {
+            "job_id": str(job.id),
+            "model": job.model,
+            "profile": job.profile,
+            "bbox_format": job.bbox_format,
+            "pipeline_version": job.pipeline_version,
+            "sha256": job.sha256,
+            "cached": False,
+            "partial": True,
+            "page_count": job.page_count,
+            "pages_done": job.pages_done,
+        },
     }
 
 
@@ -219,6 +258,7 @@ async def _process_pdf_page(
         )
         if transcription is not None:
             outcome.markdown = transcription.markdown
+            await _save_figures(state, outcome.markdown, image, page_no)
     finally:
         # The rendered page has served its purpose; nothing may outlive the call.
         image.unlink(missing_ok=True)
@@ -255,9 +295,20 @@ async def _process_image(
         )
         if transcription is not None:
             outcome.markdown = transcription.markdown
+            await _save_figures(state, outcome.markdown, normalized.path, 1)
     finally:
         normalized.path.unlink(missing_ok=True)
     return outcome
+
+
+async def _save_figures(state: RunState, markdown: str, image: Path, page_no: int) -> None:
+    """Persist the page's figure crops before retention deletes its render.
+
+    Pillow work runs off the event loop; the fan-out must not stall behind an image decode.
+    """
+    if state.figures_dir is None:
+        return
+    await asyncio.to_thread(save_page_figures, markdown, image, page_no, state.figures_dir)
 
 
 async def _record_page(
@@ -272,6 +323,8 @@ async def _record_page(
                 method=outcome.method,
                 status="failed" if outcome.error else "succeeded",
                 error=outcome.error,
+                # What the partial result reads while the job runs (docs/jobs.md).
+                markdown=outcome.markdown if not outcome.error else None,
             )
         )
         for usage in outcome.usage:
@@ -362,6 +415,7 @@ async def run_job(
     state = RunState(
         budget=VisionBudget(settings.vision_concurrency_per_job),
         max_response_bytes=settings.upstream_response_max_bytes,
+        figures_dir=Path(settings.figures_dir) / str(job.id),
     )
 
     try:

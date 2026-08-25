@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBbox, parseResultMarkdown } from './markdown'
+import { formatBbox, parseInline, parseResultMarkdown, type MathToken } from './markdown'
 
 describe('parseResultMarkdown', () => {
   it('splits on page markers and keeps block order', () => {
@@ -278,5 +278,57 @@ describe('parseResultMarkdown code and numbering', () => {
     const pages = parseResultMarkdown(['<!-- page: 1 -->', '1. First'].join('\n'))
 
     expect(pages[0]!.blocks).toEqual([{ kind: 'list', ordered: true, items: ['First'] }])
+  })
+})
+
+describe('parseInline', () => {
+  it('renders affiliation superscripts as script tokens', () => {
+    const segments = parseInline('Qingwen Bu$^{1,2}$, Yanting Yang$^2$')
+
+    expect(segments).toEqual([
+      { kind: 'text', text: 'Qingwen Bu' },
+      { kind: 'math', tex: '^{1,2}', tokens: [{ kind: 'sup', text: '1,2' }] },
+      { kind: 'text', text: ', Yanting Yang' },
+      { kind: 'math', tex: '^2', tokens: [{ kind: 'sup', text: '2' }] },
+    ])
+  })
+
+  it('handles subscripts, wrappers and symbols inside one span', () => {
+    const segments = parseInline('water is $H_2O$ at $\\text{25}\\degree$C')
+
+    expect(segments[1]).toEqual({
+      kind: 'math',
+      tex: 'H_2O',
+      tokens: [
+        { kind: 'text', text: 'H' },
+        { kind: 'sub', text: '2' },
+        { kind: 'text', text: 'O' },
+      ],
+    })
+    expect(segments[3]).toEqual({
+      kind: 'math',
+      tex: '\\text{25}\\degree',
+      tokens: [{ kind: 'text', text: '25°' }],
+    })
+  })
+
+  it('keeps an unknown command as its source characters', () => {
+    const segments = parseInline('$\\frobnicate{x}$')
+
+    expect(segments[0]!.kind).toBe('math')
+    expect((segments[0] as { tokens: MathToken[] }).tokens).toEqual([
+      { kind: 'text', text: '\\frobnicatex' },
+    ])
+  })
+
+  it('does not mistake prices for a formula', () => {
+    expect(parseInline('costs $5 and $6 total')).toEqual([
+      { kind: 'text', text: 'costs $5 and $6 total' },
+    ])
+  })
+
+  it('hands plain text through as one segment', () => {
+    expect(parseInline('no math here')).toEqual([{ kind: 'text', text: 'no math here' }])
+    expect(parseInline('')).toEqual([{ kind: 'text', text: '' }])
   })
 })

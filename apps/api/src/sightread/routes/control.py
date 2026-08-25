@@ -50,6 +50,7 @@ from ..upstream.openrouter import (
     stored_connection_models,
     validate_api_key,
 )
+from .library import figure_crop_response, partial_result
 
 router = APIRouter(prefix="/api", tags=["control"])
 
@@ -802,14 +803,32 @@ async def list_jobs(user: SessionUser, db: DbSession, limit: int = Query(default
     }
 
 
-@router.get("/jobs/{job_id}/result")
-async def job_result(job_id: uuid.UUID, user: SessionUser, db: DbSession):
+async def owned_job(db: DbSession, user_id: int, job_id: uuid.UUID) -> Job:
     job = (
-        await db.execute(select(Job).where(Job.id == job_id, Job.user_id == user.id))
+        await db.execute(select(Job).where(Job.id == job_id, Job.user_id == user_id))
     ).scalar_one_or_none()
     if job is None:
         raise ApiError(404, "invalid_request", "No such job")
+    return job
+
+
+@router.get("/jobs/{job_id}/result")
+async def job_result(job_id: uuid.UUID, user: SessionUser, db: DbSession):
+    job = await owned_job(db, user.id, job_id)
     result = (await db.execute(select(Result).where(Result.job_id == job_id))).scalar_one_or_none()
-    if result is None:
-        raise ApiError(404, "invalid_request", "This job has no result yet")
-    return result_payload(result)
+    if result is not None:
+        return result_payload(result)
+    # A running job answers with its finished pages (docs/api.md § Partial results).
+    return await partial_result(db, job)
+
+
+@router.get("/jobs/{job_id}/figures/{page}/{bbox}")
+async def job_figure(
+    job_id: uuid.UUID,
+    page: int,
+    bbox: str,
+    user: SessionUser,
+    db: DbSession,
+    settings: AppSettings,
+):
+    return figure_crop_response(settings, await owned_job(db, user.id, job_id), page, bbox)

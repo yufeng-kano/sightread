@@ -222,7 +222,9 @@ export default {
     pagesLabel: 'Pages',
     pageN: 'Page {page}',
     figureCount: '{count} fig',
-    figurePending: 'Crop not stored yet',
+    figurePending: 'No stored crop for this figure',
+    parsing: 'Still parsing — {done} of {total} pages ready',
+    parsingSimple: 'Still parsing…',
   },
   history: {
     headTitle: 'History',

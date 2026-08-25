@@ -216,7 +216,9 @@ export default {
     pagesLabel: '頁面',
     pageN: '第 {page} 頁',
     figureCount: '{count} 張圖',
-    figurePending: '尚未儲存裁切圖',
+    figurePending: '這張圖沒有已儲存的裁切圖',
+    parsing: '解析中 — 已完成 {done}/{total} 頁',
+    parsingSimple: '解析中…',
   },
   history: {
     headTitle: '紀錄',

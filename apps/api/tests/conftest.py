@@ -75,6 +75,7 @@ async def make_client(sessionmaker, tmp_path) -> AsyncIterator[Callable[..., Asy
                 "secret_key": TEST_SECRET_KEY,
                 "database_url": "sqlite+aiosqlite://",
                 "upload_dir": str(tmp_path / "uploads"),
+                "figures_dir": str(tmp_path / "figures"),
                 **overrides,
             }
         )

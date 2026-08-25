@@ -49,11 +49,13 @@ services:
     environment:
       APP_ENV: production
       UPLOAD_DIR: /data/uploads
+      FIGURES_DIR: /data/figures
     depends_on:
       pg:
         condition: service_healthy
     volumes:
       - uploads:/data/uploads
+      - figures:/data/figures
     # Migrations run once, from the api container, before it serves (docs/database.md).
     command: >
       sh -c "alembic upgrade head &&
@@ -68,6 +70,7 @@ services:
     environment:
       APP_ENV: production
       UPLOAD_DIR: /data/uploads
+      FIGURES_DIR: /data/figures
     depends_on:
       pg:
         condition: service_healthy
@@ -75,6 +78,7 @@ services:
         condition: service_started
     volumes:
       - uploads:/data/uploads
+      - figures:/data/figures
     command: ["python", "-m", "sightread.worker"]
 
   web:
@@ -124,5 +128,6 @@ services:
 volumes:
   pgdata:
   uploads:
+  figures:
   caddy_data:
   caddy_config:

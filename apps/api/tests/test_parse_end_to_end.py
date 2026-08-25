@@ -132,7 +132,7 @@ async def test_parse_a_mixed_pdf_end_to_end(api_client, sessionmaker, documents)
         "model": MODEL,
         "profile": None,
         "bbox_format": "yxyx_norm1000",
-        "pipeline_version": 2,
+        "pipeline_version": 3,
         "sha256": result["meta"]["sha256"],
         "cached": False,
     }
@@ -150,6 +150,12 @@ async def test_parse_a_mixed_pdf_end_to_end(api_client, sessionmaker, documents)
     assert {row.model for row in usage} == {MODEL}
     assert sum(row.prompt_tokens for row in usage) == 2700
     assert float(sum(row.cost for row in usage)) == pytest.approx(0.0045)
+
+    # Each page's figure crop was persisted before its render was deleted, addressed by
+    # our page number and the cleaned bbox (docs/parsing.md § Figure crops).
+    figures_dir = Path(api_client.app.state.settings.figures_dir) / job_id
+    for page_no in (1, 2, 3):
+        assert (figures_dir / f"p{page_no}_200_100_600_900.png").is_file()
 
 
 @respx.mock
@@ -177,6 +183,9 @@ async def test_parse_an_image(api_client, sessionmaker, documents) -> None:
         job = await db.get(Job, uuid.UUID(job_id))
     assert job.kind == "image"
     assert not Path(job.source_path).exists()
+    # The figure was cropped from the normalized image before it was deleted.
+    figures_dir = Path(api_client.app.state.settings.figures_dir) / job_id
+    assert (figures_dir / "p1_200_100_600_900.png").is_file()
     # The rendered/normalized copy is gone with the job's work directory.
     assert list(Path(api_client.app.state.settings.upload_dir).iterdir()) == []
 

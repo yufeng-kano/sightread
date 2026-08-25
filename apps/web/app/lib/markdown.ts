@@ -306,3 +306,153 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
 export function formatBbox(bbox: Bbox): string {
   return `[${bbox.join(',')}]`
 }
+
+// --- inline math ------------------------------------------------------------------------
+//
+// Transcriptions carry inline TeX the way papers do — `Qingwen Bu$^{1,2}$`, `H$_2$O` — and
+// showing the source characters makes an author line read like a syntax error. This is
+// affiliation-marker-grade math, not a TeX engine: superscripts, subscripts, the
+// `\text`-family wrappers and a short symbol table. Anything unrecognized keeps its source
+// characters, and display math stays a verbatim block (docs/web.md § Result viewer).
+
+/** One run inside a rendered math span: plain, superscript or subscript. */
+export interface MathToken {
+  kind: 'text' | 'sup' | 'sub'
+  text: string
+}
+
+export type InlineSegment =
+  | { kind: 'text'; text: string }
+  /** `tex` is the source between the dollars, verbatim — copy-as-markdown reads it back. */
+  | { kind: 'math'; tex: string; tokens: MathToken[] }
+
+/** Wrappers whose braces mean "typeset this normally" — the content is kept, the command
+ *  dropped. `operatorname` is the odd one out but appears in transcriptions. */
+const TEXT_WRAPPERS = new Set(['text', 'textrm', 'textit', 'textbf', 'mathrm', 'mathbf', 'mathit', 'mathsf', 'mathcal', 'operatorname'])
+
+/** The symbols vision transcriptions actually produce. Unknown commands stay verbatim —
+ *  a wrong glyph is worse than visible TeX. */
+const MATH_SYMBOLS: Record<string, string> = {
+  alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ε', varepsilon: 'ε',
+  zeta: 'ζ', eta: 'η', theta: 'θ', iota: 'ι', kappa: 'κ', lambda: 'λ', mu: 'μ',
+  nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ', sigma: 'σ', tau: 'τ', upsilon: 'υ',
+  phi: 'φ', varphi: 'φ', chi: 'χ', psi: 'ψ', omega: 'ω',
+  Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π', Sigma: 'Σ',
+  Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+  times: '×', cdot: '·', pm: '±', mp: '∓', div: '÷', leq: '≤', le: '≤', geq: '≥',
+  ge: '≥', neq: '≠', ne: '≠', approx: '≈', sim: '~', propto: '∝', infty: '∞',
+  rightarrow: '→', to: '→', leftarrow: '←', leftrightarrow: '↔', Rightarrow: '⇒',
+  degree: '°', circ: '∘', bullet: '•', star: '★', dagger: '†', ddagger: '‡',
+  ldots: '…', dots: '…', cdots: '⋯', prime: '′', partial: '∂', nabla: '∇',
+  sum: 'Σ', prod: 'Π', int: '∫', sqrt: '√', in: '∈', notin: '∉', subset: '⊂',
+  cup: '∪', cap: '∩', forall: '∀', exists: '∃', emptyset: '∅', angle: '∠',
+  percent: '%', '%': '%', '&': '&', '#': '#', _: '_', '{': '{', '}': '}', '$': '$',
+  ',': ' ', ';': ' ', quad: ' ', qquad: ' ',
+}
+
+/** `{…}` balanced from `start` (which must point at the `{`), else the single char or
+ *  `\command` there. Returns the argument's content and the index just past it. */
+function readArgument(tex: string, start: number): [string, number] {
+  if (tex[start] === '{') {
+    let depth = 0
+    for (let index = start; index < tex.length; index += 1) {
+      if (tex[index] === '{') depth += 1
+      if (tex[index] === '}') {
+        depth -= 1
+        if (depth === 0) {
+          return [tex.slice(start + 1, index), index + 1]
+        }
+      }
+    }
+    // Unbalanced: everything to the end is the argument, which at least loses nothing.
+    return [tex.slice(start + 1), tex.length]
+  }
+  if (tex[start] === '\\') {
+    const match = /^\\[a-zA-Z]+/.exec(tex.slice(start))
+    if (match) {
+      return [match[0], start + match[0].length]
+    }
+    return [tex.slice(start, start + 2), start + 2]
+  }
+  return [tex[start] ?? '', start + 1]
+}
+
+function pushToken(out: MathToken[], kind: MathToken['kind'], text: string) {
+  if (!text) {
+    return
+  }
+  const last = out[out.length - 1]
+  if (last && last.kind === kind) {
+    last.text += text
+  } else {
+    out.push({ kind, text })
+  }
+}
+
+/** Flattens one TeX run into renderable tokens. Scripts inside scripts flatten to the
+ *  outer kind — `x^{y^z}` is beyond what this reader promises to draw. */
+function tokenizeMath(tex: string, kind: MathToken['kind'], out: MathToken[]): void {
+  let index = 0
+  while (index < tex.length) {
+    const char = tex[index] ?? ''
+    if ((char === '^' || char === '_') && kind === 'text') {
+      const [argument, next] = readArgument(tex, index + 1)
+      tokenizeMath(argument, char === '^' ? 'sup' : 'sub', out)
+      index = next
+      continue
+    }
+    if (char === '\\') {
+      const [command, next] = readArgument(tex, index)
+      const name = command.slice(1)
+      if (TEXT_WRAPPERS.has(name) && tex[next] === '{') {
+        const [argument, past] = readArgument(tex, next)
+        tokenizeMath(argument, kind, out)
+        index = past
+      } else if (name in MATH_SYMBOLS) {
+        pushToken(out, kind, MATH_SYMBOLS[name] ?? '')
+        index = next
+      } else {
+        pushToken(out, kind, command)
+        index = next
+      }
+      continue
+    }
+    if (char === '{' || char === '}') {
+      index += 1
+      continue
+    }
+    pushToken(out, kind, char)
+    index += 1
+  }
+}
+
+/** A `$…$` span: opens on `$` + non-space, closes on non-space + `$`, and never ends
+ *  before a digit — so "$5 and $6" stays two prices, not a formula. */
+const MATH_SPAN = /\$([^$\n]+)\$(?!\d)/g
+
+/**
+ * Splits one line of prose (a paragraph, heading, list item, table cell or caption) into
+ * plain text and rendered math spans.
+ */
+export function parseInline(text: string): InlineSegment[] {
+  const segments: InlineSegment[] = []
+  let cursor = 0
+  MATH_SPAN.lastIndex = 0
+  for (const match of text.matchAll(MATH_SPAN)) {
+    const tex = match[1] ?? ''
+    if (/^\s/.test(tex) || /\s$/.test(tex)) {
+      continue
+    }
+    if (match.index > cursor) {
+      segments.push({ kind: 'text', text: text.slice(cursor, match.index) })
+    }
+    const tokens: MathToken[] = []
+    tokenizeMath(tex, 'text', tokens)
+    segments.push({ kind: 'math', tex, tokens })
+    cursor = match.index + match[0].length
+  }
+  if (cursor < text.length || segments.length === 0) {
+    segments.push({ kind: 'text', text: text.slice(cursor) })
+  }
+  return segments
+}
