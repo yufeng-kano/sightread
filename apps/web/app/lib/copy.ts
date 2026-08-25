@@ -40,6 +40,19 @@ function tag(node: MarkdownNode): string {
   return (node.tagName ?? '').toLowerCase()
 }
 
+/**
+ * Collapses runs of whitespace into one space and trims — except inside `` `code` ``
+ * spans, whose spaces are content: `` `a  b` `` restored from `data-src` must not lose
+ * its double space to the surrounding block's normalization.
+ */
+function collapseWhitespace(text: string): string {
+  return text
+    .split(/(`[^`\n]*`)/)
+    .map((part, index) => (index % 2 ? part : part.replace(/\s+/g, ' ')))
+    .join('')
+    .trim()
+}
+
 /** Inline content: text runs plus math spans, which come back as their `data-tex`. */
 function inlineText(node: MarkdownNode): string {
   if (node.nodeType === TEXT_NODE) {
@@ -94,7 +107,7 @@ function inlineSource(node: MarkdownNode, src: string): string {
 
 /** A table cell's markdown: inline content with its pipes escaped, on one line. */
 function cellText(node: MarkdownNode): string {
-  return inlineText(node).replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|')
+  return collapseWhitespace(inlineText(node)).replace(/\|/g, '\\|')
 }
 
 function tableRows(node: MarkdownNode): MarkdownNode[] {
@@ -149,7 +162,7 @@ function listToMarkdown(node: MarkdownNode): string {
   return items
     .map((item, index) => {
       const marker = ordered ? `${start + index}.` : '-'
-      return `${marker} ${inlineText(item).replace(/\s+/g, ' ').trim()}`
+      return `${marker} ${collapseWhitespace(inlineText(item))}`
     })
     .join('\n')
 }
@@ -223,7 +236,7 @@ function blockToMarkdown(node: MarkdownNode, partialBlocks?: ReadonlySet<string>
     case 'pre':
       return codeToMarkdown(node)
     case 'p':
-      return inlineText(node).replace(/\s+/g, ' ').trim()
+      return collapseWhitespace(inlineText(node))
     default:
       return null
   }
@@ -250,7 +263,7 @@ interface Walk {
 }
 
 function flush(walk: Walk): void {
-  const text = walk.inline.join('').replace(/\s+/g, ' ').trim()
+  const text = collapseWhitespace(walk.inline.join(''))
   if (text) {
     walk.blocks.push(text)
   }
@@ -309,7 +322,7 @@ function orphansToMarkdown(
   return group
     .map((item, index) => {
       const marker = list?.ordered ? `${list.start + index}.` : '-'
-      return `${marker} ${inlineText(item).replace(/\s+/g, ' ').trim()}`
+      return `${marker} ${collapseWhitespace(inlineText(item))}`
     })
     .join('\n')
 }

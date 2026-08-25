@@ -306,6 +306,19 @@ function onCopy(event: ClipboardEvent) {
         fragments.push(range.toString())
         continue
       }
+      // A selection wholly inside one KaTeX block never reaches the serializer's
+      // `data-md` (the clone drops the block root): selecting every visible glyph is
+      // the whole formula and copies as its `$$…$$` source; anything less copies as
+      // the glyph text it looks like.
+      const mathBlock = element?.closest('.md-math-block')
+      if (mathBlock) {
+        const glyphs = mathBlock.querySelector('.katex-html')?.textContent ?? ''
+        const covered =
+          range.toString().replace(/\s+/g, ' ').trim() === glyphs.replace(/\s+/g, ' ').trim()
+        const source = mathBlock.getAttribute('data-md')
+        fragments.push(covered && source ? source : range.toString())
+        continue
+      }
       const markdown = nodesToMarkdown(
         range.cloneContents().childNodes,
         orphanListContext(range),

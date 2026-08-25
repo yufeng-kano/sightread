@@ -449,6 +449,15 @@ describe('parseInline', () => {
     ])
   })
 
+  it('lets an escaped backtick protect nothing', () => {
+    expect(parseInline('show \\` then $x$ and `code`')).toEqual([
+      { kind: 'text', text: 'show \\` then ' },
+      { kind: 'math', tex: 'x' },
+      { kind: 'text', text: ' and ' },
+      { kind: 'code', text: 'code', src: '`code`' },
+    ])
+  })
+
   it('lets an unclosed backtick protect nothing', () => {
     expect(parseInline('a ` b $x$')).toEqual([
       { kind: 'text', text: 'a ` b ' },

@@ -246,3 +246,15 @@ describe('display math cut by a selection boundary', () => {
     )
   })
 })
+
+describe('whitespace inside restored code spans', () => {
+  it('keeps repeated spaces in an inline code span through block normalization', () => {
+    const paragraph = el('p', { class: 'md-p' }, [
+      text('run   '),
+      el('code', { class: 'md-inline-code', 'data-src': '`a  b`' }, [text('a  b')]),
+      text('   now'),
+    ])
+
+    expect(nodesToMarkdown([paragraph])).toBe('run `a  b` now')
+  })
+})
