@@ -200,3 +200,19 @@ describe('rendered inline markdown', () => {
     expect(nodesToMarkdown([block])).toBe('$$\nx = 1\n$$')
   })
 })
+
+describe('partially selected styled elements', () => {
+  it('re-wraps only the cloned children when a boundary cuts through', () => {
+    const cut = el('strong', { 'data-src': '**96.5**' }, [text('6.5')])
+
+    expect(nodesToMarkdown([el('p', { class: 'md-p' }, [cut, text(' result')])])).toBe(
+      '**6.5** result',
+    )
+  })
+
+  it('drops an element cloned empty at the selection edge', () => {
+    const empty = el('em', { 'data-src': '*note*' }, [])
+
+    expect(nodesToMarkdown([el('p', { class: 'md-p' }, [empty, text('after')])])).toBe('after')
+  })
+})

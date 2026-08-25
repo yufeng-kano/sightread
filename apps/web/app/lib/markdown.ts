@@ -439,6 +439,15 @@ export function parseInline(text: string): InlineSegment[] {
 
   while (scan < text.length) {
     const open = text.indexOf('$', scan)
+    // A code span protects its contents: in "write `$x$` literally" the dollars are code,
+    // not math, so a complete span is stepped over whole — parseStyled reads it later from
+    // the same text. An unclosed backtick protects nothing.
+    const tick = text.indexOf('`', scan)
+    if (tick !== -1 && (open === -1 || tick < open)) {
+      const code = CODE_AT.exec(text.slice(tick))
+      scan = tick + (code ? code[0].length : 1)
+      continue
+    }
     if (open === -1) {
       break
     }

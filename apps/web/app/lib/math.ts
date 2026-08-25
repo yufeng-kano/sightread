@@ -22,7 +22,10 @@ export function renderTexHtml(tex: string, displayMode: boolean): string | null 
       // Warnings (about unicode in math mode, say) are not errors — render anyway,
       // and keep them out of the console.
       strict: 'ignore',
-      macros: MACROS,
+      // A fresh copy per call: KaTeX writes `\gdef`-style definitions into this object,
+      // and a shared one would let one document's formula redefine commands for every
+      // formula rendered after it.
+      macros: { ...MACROS },
     })
   } catch {
     return null

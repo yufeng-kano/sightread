@@ -27,13 +27,14 @@ const rendered = computed(() =>
 
 <template>
   <template v-for="({ segment, html }, index) in rendered" :key="index">
-    <!-- eslint-disable-next-line vue/no-v-html -- KaTeX escapes its input; `trust` is off -->
+    <!-- eslint-disable vue/no-v-html -- KaTeX escapes its input; `trust` is off -->
     <span
       v-if="segment.kind === 'math' && html !== null"
       class="md-inline-math"
       :data-tex="`$${segment.tex}$`"
       v-html="html"
     />
+    <!-- eslint-enable vue/no-v-html -->
     <span
       v-else-if="segment.kind === 'math'"
       class="md-inline-math"

@@ -382,6 +382,21 @@ describe('parseInline', () => {
     ])
   })
 
+  it('keeps dollars inside a code span as code, not math', () => {
+    expect(parseInline('write `$x$` literally')).toEqual([
+      { kind: 'text', text: 'write ' },
+      { kind: 'code', text: '$x$', src: '`$x$`' },
+      { kind: 'text', text: ' literally' },
+    ])
+  })
+
+  it('lets an unclosed backtick protect nothing', () => {
+    expect(parseInline('a ` b $x$')).toEqual([
+      { kind: 'text', text: 'a ` b ' },
+      { kind: 'math', tex: 'x' },
+    ])
+  })
+
   it('keeps underscores inside a math span out of emphasis', () => {
     expect(parseInline('$a_{1}$ and $b_{2}$')).toEqual([
       { kind: 'math', tex: 'a_{1}' },

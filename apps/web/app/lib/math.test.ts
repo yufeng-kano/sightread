@@ -21,3 +21,10 @@ describe('renderTexHtml', () => {
     expect(renderTexHtml('\\frobnicate{x}', false)).toBeNull()
   })
 })
+
+describe('macro isolation', () => {
+  it('does not let one formula redefine commands for the next', () => {
+    expect(renderTexHtml('\\gdef\\zzz{9}\\zzz', false)).not.toBeNull()
+    expect(renderTexHtml('\\zzz', false)).toBeNull()
+  })
+})

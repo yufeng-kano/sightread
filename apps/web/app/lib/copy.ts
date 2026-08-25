@@ -55,9 +55,41 @@ function inlineText(node: MarkdownNode): string {
   // Rendered emphasis, code and <br> carry their exact markdown source (docs/web.md).
   const src = attribute(node, 'data-src')
   if (src !== null) {
-    return src
+    return inlineSource(node, src)
   }
   return children(node).map(inlineText).join('')
+}
+
+/**
+ * A styled element's markdown. `data-src` is the exact source — but a selection boundary
+ * can cut through the element: `cloneContents` then keeps the element (and its full
+ * attribute) over truncated children, and handing back the whole source would claim text
+ * the user did not select. So the source is trusted only when the children still serialize
+ * to exactly what sits between its markers; a partial clone re-wraps what actually
+ * survived. Nested styling still round-trips, because nested elements carry `data-src` of
+ * their own.
+ */
+function inlineSource(node: MarkdownNode, src: string): string {
+  const name = tag(node)
+  let marker: string
+  if (name === 'strong') {
+    marker = src.startsWith('__') ? '__' : '**'
+  } else if (name === 'em') {
+    marker = src.startsWith('_') ? '_' : '*'
+  } else if (name === 'code') {
+    marker = '`'
+  } else {
+    // <br> has no children to lose — its source is its source.
+    return src
+  }
+  const inner = children(node).map(inlineText).join('')
+  // A boundary sitting exactly on the element's edge clones it empty — markers around
+  // nothing are not markdown, they are noise.
+  if (!inner) {
+    return ''
+  }
+  const expected = src.slice(marker.length, src.length - marker.length)
+  return inner === expected ? src : `${marker}${inner}${marker}`
 }
 
 /** A table cell's markdown: inline content with its pipes escaped, on one line. */
