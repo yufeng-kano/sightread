@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBbox, parseInline, parseResultMarkdown } from './markdown'
+import { parseInline, parseResultMarkdown } from './markdown'
 
 describe('parseResultMarkdown', () => {
   it('splits on page markers and keeps block order', () => {
@@ -43,7 +43,6 @@ describe('parseResultMarkdown', () => {
       ['<!-- page: 3 -->', '![fig1](sightread://p3/120,60,480,940)', 'Figure 1: revenue by region'].join('\n'),
     )
 
-    expect(pages[0]!.figureCount).toBe(1)
     expect(pages[0]!.blocks).toEqual([
       {
         kind: 'fig',
@@ -87,12 +86,6 @@ describe('parseResultMarkdown', () => {
 
   it('returns nothing for an empty document', () => {
     expect(parseResultMarkdown('')).toEqual([])
-  })
-})
-
-describe('formatBbox', () => {
-  it('prints the four coordinates in the stored order', () => {
-    expect(formatBbox([120, 60, 480, 940])).toBe('[120,60,480,940]')
   })
 })
 
@@ -396,9 +389,21 @@ describe('parseInline', () => {
     ])
   })
 
-  it('leaves backslash-escaped markers literal', () => {
-    expect(parseInline('\\*literal\\*')).toEqual([{ kind: 'text', text: '\\*literal\\*' }])
-    expect(parseInline('*a\\*')).toEqual([{ kind: 'text', text: '*a\\*' }])
+  it('renders a backslash-escaped marker as the character, without the backslash', () => {
+    expect(parseInline('\\*literal\\*')).toEqual([{ kind: 'text', text: '*literal*' }])
+    expect(parseInline('*a\\*')).toEqual([{ kind: 'text', text: '*a*' }])
+  })
+
+  it('unescapes the brackets a reference list arrives with', () => {
+    expect(parseInline('\\[87] Seonghyeon Ye, Joel Jang')).toEqual([
+      { kind: 'text', text: '[87] Seonghyeon Ye, Joel Jang' },
+    ])
+  })
+
+  it('keeps a backslash that escapes nothing', () => {
+    expect(parseInline('C:\\path and 5\\n')).toEqual([
+      { kind: 'text', text: 'C:\\path and 5\\n' },
+    ])
   })
 
   it('reads a triple-asterisk run as em holding strong', () => {
@@ -468,19 +473,41 @@ describe('parseInline', () => {
 
   it('treats an even backslash run as escaping itself, not the marker', () => {
     expect(parseInline('\\\\*word*')).toEqual([
-      { kind: 'text', text: '\\\\' },
+      { kind: 'text', text: '\\' },
       { kind: 'em', segments: [{ kind: 'text', text: 'word' }], src: '*word*' },
     ])
     expect(parseInline('\\\\`$x$`')).toEqual([
-      { kind: 'text', text: '\\\\' },
+      { kind: 'text', text: '\\' },
       { kind: 'code', text: '$x$', src: '`$x$`' },
     ])
   })
 
   it('lets a self-escaped backslash precede a live closer', () => {
     expect(parseInline('*path\\\\*')).toEqual([
-      { kind: 'em', segments: [{ kind: 'text', text: 'path\\\\' }], src: '*path\\\\*' },
+      { kind: 'em', segments: [{ kind: 'text', text: 'path\\' }], src: '*path\\\\*' },
     ])
+  })
+
+  it('closes a span on the dollar at brace depth zero, not the first one', () => {
+    const tex = String.raw`\text{\sout{$E'_v = 1$}}`
+
+    expect(parseInline(`w/o Visual: $${tex}$`)).toEqual([
+      { kind: 'text', text: 'w/o Visual: ' },
+      { kind: 'math', tex },
+    ])
+  })
+
+  it('keeps a whole cases block with nested text-mode math as one formula', () => {
+    const tex = String.raw`\begin{cases} \text{\sout{$a = 1,$}} \\ b = \bcancel{2} \end{cases}`
+
+    expect(parseInline(`$${tex}$ ends`)).toEqual([
+      { kind: 'math', tex },
+      { kind: 'text', text: ' ends' },
+    ])
+  })
+
+  it('does not let an escaped dollar open a span', () => {
+    expect(parseInline('costs \\$5 and \\$6')).toEqual([{ kind: 'text', text: 'costs $5 and $6' }])
   })
 
   it('keeps dollars inside a code span as code, not math', () => {
@@ -493,7 +520,7 @@ describe('parseInline', () => {
 
   it('lets an escaped backtick protect nothing', () => {
     expect(parseInline('show \\` then $x$ and `code`')).toEqual([
-      { kind: 'text', text: 'show \\` then ' },
+      { kind: 'text', text: 'show ` then ' },
       { kind: 'math', tex: 'x' },
       { kind: 'text', text: ' and ' },
       { kind: 'code', text: 'code', src: '`code`' },

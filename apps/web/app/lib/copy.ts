@@ -216,10 +216,6 @@ function blockToMarkdown(node: MarkdownNode, partialBlocks?: ReadonlySet<string>
     return source
   }
   const names = classes(node)
-  // The viewer's page labels are navigation, not document content.
-  if (names.includes('page-marker') || names.includes('page-rail')) {
-    return ''
-  }
   if (names.includes('md-h2') || names.includes('md-h3')) {
     // The viewer draws two heading sizes, but the source depth rides on `data-level` —
     // copying `# Title` must not demote it to `##`, nor `####` promote to `###`.

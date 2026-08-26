@@ -104,9 +104,8 @@ describe('nodesToMarkdown', () => {
     expect(nodesToMarkdown(nodes)).toBe('Qingwen Bu$^{1,2}$ and others')
   })
 
-  it('separates whole blocks with blank lines and drops page markers', () => {
+  it('separates whole blocks with blank lines', () => {
     const section = el('section', { class: 'page' }, [
-      el('p', { class: 'eyebrow sm page-marker' }, [text('Page 1')]),
       el('article', { class: 'prose' }, [
         el('h4', { class: 'md-h3' }, [text('Notes')]),
         el('p', { class: 'md-p' }, [text('Body text.')]),

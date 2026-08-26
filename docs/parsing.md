@@ -61,6 +61,8 @@ Resolution order for a job's prompt, decided at enqueue time and stored on the j
 2. The preset profile's template, for a job running a profile.
 3. `DEFAULT_PROMPT_TEMPLATE` (shipped in code, shown on the settings page as the default).
 
+What the default template asks for beyond the markdown itself: the page's **furniture is left out** — a page or slide number, and a running header or footer that repeats across pages. A deck numbers every slide and a paper numbers every page; neither is what a reader of a transcription came for, and the viewer already knows which page a passage came from (web.md § Result viewer). The instruction then says, explicitly, that a number inside a sentence, a figure or table label, a citation marker, a numbered heading or a table **is** content: a model told to drop numbers will otherwise drop the ones that carry meaning. Changing the template changes results, so `PIPELINE_VERSION` moves with it and cached results parsed under the old wording stop answering new uploads.
+
 `jobs.prompt` holds the effective template verbatim (reproducibility); `jobs.prompt_sha256` is part of the dedup cache key ([jobs.md](./jobs.md)), so editing a preset's text invalidates cached results parsed with the old one.
 
 ## Profiles

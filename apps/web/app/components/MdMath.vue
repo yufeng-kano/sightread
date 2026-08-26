@@ -35,10 +35,18 @@ const blockId = useId()
 
 <style scoped>
 /* The formula keeps the body's colour; wider than the measure, it scrolls in place like a
-   table rather than stretching the page. */
+   table rather than stretching the page.
+   Sideways *only*. `overflow-y` is stated rather than left alone because CSS computes a
+   `visible` axis to `auto` as soon as the other one is not — so `overflow-x: auto` alone
+   hands a tall `\begin{cases}` a vertical scrollbar and shows half of it. The block has no
+   height of its own, so hiding that axis expands to the formula instead of clipping it; the
+   vertical padding is slack for the fraction bars and accents KaTeX draws a pixel or two
+   outside its own box. */
 .md-math-block {
   overflow-x: auto;
+  overflow-y: hidden;
   overscroll-behavior-x: contain;
+  padding-block: var(--space-1);
   color: var(--ink-soft);
 }
 
@@ -51,6 +59,7 @@ const blockId = useId()
 .md-math {
   margin: 0;
   overflow-x: auto;
+  overflow-y: hidden;
   color: var(--ink-soft);
   font-family: var(--mono);
   font-size: var(--text-sm);

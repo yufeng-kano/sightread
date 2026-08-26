@@ -1,8 +1,14 @@
 # Local full stack (docs/deployment.md). Plain HTTP, ports exposed on localhost.
+#
+# Containers are named rather than left to compose's generated `<project>-<service>-1`, so
+# `docker logs -f sightread-worker` is the same command here as in production. The names are
+# the same in both stacks, which is also why only one of them can be up at a time
+# (docs/deployment.md § Compose files).
 
 services:
   pg:
     image: postgres:16
+    container_name: sightread-pg
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sightread}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sightread}
@@ -21,6 +27,7 @@ services:
   api:
     build:
       context: ./apps/api
+    container_name: sightread-api
     env_file:
       - path: .env
         required: false
@@ -51,6 +58,7 @@ services:
     # Same image as the api; only the command differs (docs/project-structure.md).
     build:
       context: ./apps/api
+    container_name: sightread-worker
     env_file:
       - path: .env
         required: false
@@ -70,6 +78,7 @@ services:
   web:
     build:
       context: ./apps/web
+    container_name: sightread-web
     depends_on:
       - api
     ports:
@@ -79,6 +88,7 @@ services:
   # locally exactly like production does — use http://localhost:8080 for the full stack.
   caddy:
     image: caddy:2
+    container_name: sightread-caddy
     depends_on:
       - api
       - web

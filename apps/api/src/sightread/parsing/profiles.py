@@ -18,13 +18,18 @@ BBOX_FORMAT_YXYX = "yxyx_norm1000"
 # Part of the dedup cache key; bump when the pipeline changes results (docs/jobs.md).
 # The default template below is covered by this version, since jobs that run a raw model
 # instead of a preset carry no profile version of their own.
-PIPELINE_VERSION = 4  # 4: figure boxes bound the graphic only, captions excluded
+PIPELINE_VERSION = 5  # 5: page/slide numbers and running headers and footers dropped
 
 # Transcription prompt for a rendered page. `{page}` is the real page number: the model is
 # told what to write so the placeholder it emits already matches our own numbering.
 DEFAULT_PROMPT_TEMPLATE = """Transcribe this page image into GitHub-flavoured Markdown.
 Reproduce the text verbatim and in reading order, keeping headings, lists, tables and
 formulas. Do not summarise, do not comment, and do not wrap your answer in a code fence.
+
+Leave out the page's furniture: the page or slide number, and any running header or footer
+that repeats across pages. A number that belongs to the content is not furniture and must be
+kept — a number inside a sentence, a figure or table label, a citation marker, a numbered
+heading, or any number inside a table.
 
 Where a figure, chart, photograph, diagram or map appears, emit a line of the form
 ![fig](sightread://p{page}/YMIN,XMIN,YMAX,XMAX)

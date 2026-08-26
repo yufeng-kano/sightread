@@ -23,7 +23,7 @@ const props = withDefaults(
   defineProps<{
     /** The dialog's accessible name. Also the visible title unless the `title` slot fills it. */
     title: string
-    size?: 'sm' | 'md' | 'lg'
+    size?: 'sm' | 'md' | 'lg' | 'full'
     /** Fixed-height grid body — for a dialog whose content owns its own scroll regions. */
     tall?: boolean
     /** The body manages its own padding. */
@@ -118,7 +118,7 @@ onBeforeUnmount(() => {
 
 <template>
   <Teleport to="body">
-    <div class="overlay" @click.self="busy || emit('close')">
+    <div class="overlay" :class="{ full: size === 'full' }" @click.self="busy || emit('close')">
       <div
         ref="panel"
         class="panel"
@@ -202,12 +202,32 @@ onBeforeUnmount(() => {
   max-width: 1040px;
 }
 
+/* The viewport, edge to edge. Not an interruption to the screen behind it but the thing the
+   reader came for — see docs/web.md § Result viewer, its only caller. */
+.overlay.full {
+  padding: 0;
+}
+
+.panel.full {
+  max-width: none;
+  border: none;
+}
+
+.panel.tall.full {
+  height: 100dvh;
+  max-height: none;
+}
+
 /*
  * A fixed box, not a max: the viewer's body is a grid whose columns scroll independently,
  * and a body sized to its content has no height for them to scroll within.
  */
 .panel.tall {
   display: grid;
+  /* `minmax(0, 1fr)`, never the implicit `auto` track: an auto column is sized by its
+     content, so one wide line inside the body would push the whole dialog past the viewport
+     and carry its header off the right edge. The body scrolls; the panel does not grow. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   height: min(820px, calc(100dvh - var(--space-10)));
   max-height: none;

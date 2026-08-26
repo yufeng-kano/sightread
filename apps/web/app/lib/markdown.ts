@@ -36,10 +36,9 @@ export type ResultBlock =
   | { kind: 'fig'; id: string; bbox: Bbox; caption: string | null }
 
 export interface ResultPageBlocks {
+  /** The viewer never prints this — it addresses a figure's crop with it. */
   page: number
   blocks: ResultBlock[]
-  /** Shown beside the page in the viewer's rail, so a reader can find the figures. */
-  figureCount: number
 }
 
 const PAGE_MARKER = /^<!--\s*page:\s*(\d+)\s*-->$/
@@ -117,7 +116,7 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
 
   function page(): ResultPageBlocks {
     if (!current) {
-      current = { page: 1, blocks: [], figureCount: 0 }
+      current = { page: 1, blocks: [] }
       pages.push(current)
     }
     return current
@@ -132,7 +131,7 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       // A marker for the page already open (the leading-content case above) continues it
       // rather than starting an empty duplicate.
       if (!current || current.page !== number) {
-        current = { page: number, blocks: [], figureCount: 0 }
+        current = { page: number, blocks: [] }
         pages.push(current)
       }
       continue
@@ -154,11 +153,10 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       }
       target.blocks.push({
         kind: 'fig',
-        id: figure[1] || `fig${target.figureCount + 1}`,
+        id: figure[1] || `fig${target.blocks.filter((block) => block.kind === 'fig').length + 1}`,
         bbox: [Number(figure[3]), Number(figure[4]), Number(figure[5]), Number(figure[6])],
         caption: captioned ? next : null,
       })
-      target.figureCount += 1
       continue
     }
 
@@ -306,11 +304,6 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
   return pages
 }
 
-/** `[ymin, xmin, ymax, xmax]` as the caption prints it, beside the figure's name. */
-export function formatBbox(bbox: Bbox): string {
-  return `[${bbox.join(',')}]`
-}
-
 // --- inline content --------------------------------------------------------------------
 //
 // Transcriptions carry inline TeX the way papers do — `Qingwen Bu$^{1,2}$`, `H$_2$O` — and
@@ -329,18 +322,63 @@ export type InlineSegment =
   | { kind: 'code'; text: string; src: string }
   | { kind: 'br'; src: string }
 
-/** A `$…$` span anchored at one candidate opener: closes on `$` not followed by a digit —
- *  so "$5 and $6" stays two prices, not a formula. The content never crosses a backtick:
- *  a rejected price before a code span (``cost $5 and `$x$` ``) must not steal its
- *  closer from inside the code — the failed candidate leaves the code-span guard in
- *  `parseInline` to protect those dollars, and TeX has no backticks to lose. */
-const MATH_SPAN_AT = /^\$([^$`\n]+)\$(?!\d)/
+/**
+ * The `$…$` span opening at `open`, or null when there is none.
+ *
+ * Not a regex, because the closer is not simply the next dollar: **TeX nests math inside
+ * text**, and a transcription of a struck-through equation is full of it —
+ * `$\text{\sout{$E'_v = 1$}}$` is one formula, not two. So the span closes on the first
+ * dollar at **brace depth zero**, and the dollars inside a `\text{…}` are its content.
+ * Closing on the first dollar instead cut such a formula in half and handed KaTeX an
+ * unbalanced fragment, which fell back to source characters and left the whole line reading
+ * as raw TeX.
+ *
+ * The rest of the rules are the ones this parser always had: a span never crosses a backtick
+ * (a rejected price before a code span — ``cost $5 and `$x$` `` — must not steal its closer
+ * from inside the code, and TeX has no backticks to lose) or a line break, never holds
+ * leading or trailing space, and never closes on a dollar followed by a digit, so
+ * "$5 and $6" stays two prices.
+ */
+function mathSpanAt(text: string, open: number): { tex: string; length: number } | null {
+  let depth = 0
+  for (let index = open + 1; index < text.length; index += 1) {
+    const char = text[index]
+    // An escaped character is content, whatever it is: `\$` is a dollar sign and `\{` is a
+    // brace, and neither counts towards the nesting this scan is tracking.
+    if (char === '\\') {
+      index += 1
+      continue
+    }
+    if (char === '`' || char === '\n') {
+      return null
+    }
+    if (char === '{') {
+      depth += 1
+    } else if (char === '}') {
+      depth = Math.max(0, depth - 1)
+    } else if (char === '$' && depth === 0) {
+      const tex = text.slice(open + 1, index)
+      if (!tex || /^\s|\s$/.test(tex) || /\d/.test(text[index + 1] ?? '')) {
+        return null
+      }
+      return { tex, length: index + 1 - open }
+    }
+  }
+  return null
+}
 
 /** `<br>` in a table cell is a line break, not text — the one HTML tag transcriptions use. */
 const BR_AT = /^<br\s*\/?>/i
 
 /** An inline code span. Single backticks only — a fenced block never reaches this parser. */
 const CODE_AT = /^`([^`\n]+)`/
+
+/**
+ * GFM's backslash escape: before an ASCII punctuation character a backslash makes that
+ * character literal **and does not print itself** — `\[87]` in a reference list is `[87]`.
+ * Before anything else (`C:\path`, a stray `\n`) it is an ordinary backslash and stays.
+ */
+const ESCAPABLE = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/
 
 // Emphasis opens on a marker followed by non-space and closes on non-space + marker, per
 // GFM's flanking idea reduced to what transcriptions produce. The asterisk forms allow
@@ -389,9 +427,24 @@ function parseStyled(text: string): InlineSegment[] {
   let cursor = 0
   let scan = 0
 
+  /** Merged into the run before it when there is one: an escape splits a paragraph mid-word
+   *  (`\[87]` between two plain runs), and three text segments where one will do is three
+   *  DOM nodes a selection has to be stitched back across. */
+  function pushText(value: string): void {
+    if (!value) {
+      return
+    }
+    const last = segments[segments.length - 1]
+    if (last?.kind === 'text') {
+      last.text += value
+      return
+    }
+    segments.push({ kind: 'text', text: value })
+  }
+
   function flushText(end: number): void {
     if (end > cursor) {
-      segments.push({ kind: 'text', text: text.slice(cursor, end) })
+      pushText(text.slice(cursor, end))
     }
   }
 
@@ -404,14 +457,23 @@ function parseStyled(text: string): InlineSegment[] {
 
   while (scan < text.length) {
     const char = text[scan]
-    if (char !== '*' && char !== '_' && char !== '`' && char !== '<') {
+    if (char !== '*' && char !== '_' && char !== '`' && char !== '<' && char !== '\\') {
       scan += 1
       continue
     }
-    // A backslash-escaped marker is that literal character, never a delimiter — GFM's
-    // `\*literal\*` must not open emphasis. The backslash stays visible, like every
-    // other shape this parser declines to interpret.
-    if (isEscaped(text, scan)) {
+    // An escape is consumed here, which is also why nothing below re-checks for one: a
+    // backslash and the punctuation it escapes are taken as a pair, so the scan can never
+    // land on a marker that still has a live backslash in front of it. `\*literal\*` is
+    // the two asterisks as text, and `\\*word*` is one backslash and a real emphasis.
+    if (char === '\\') {
+      const escaped = text[scan + 1] ?? ''
+      if (ESCAPABLE.test(escaped)) {
+        flushText(scan)
+        pushText(escaped)
+        cursor = scan + 2
+        scan = cursor
+        continue
+      }
       scan += 1
       continue
     }
@@ -475,7 +537,7 @@ function parseStyled(text: string): InlineSegment[] {
  * Splits one line of prose (a paragraph, heading, list item, table cell or caption) into
  * plain text, math spans and styled-inline segments.
  *
- * Math is split first, and scanned dollar by dollar rather than with one global regex on
+ * Math is split first, and scanned dollar by dollar rather than with one global match on
  * purpose: a rejected candidate (a price, a span padded with spaces) resumes just past its
  * *opening* dollar — a global match would have consumed the next span's opener as its own
  * closer, so "cost $5 and variable $x$" would lose the real formula. Splitting math first
@@ -509,15 +571,20 @@ export function parseInline(text: string): InlineSegment[] {
     if (open === -1) {
       break
     }
-    const match = MATH_SPAN_AT.exec(text.slice(open))
-    const tex = match?.[1] ?? ''
-    if (!match || /^\s/.test(tex) || /\s$/.test(tex)) {
+    // A backslash-escaped dollar is a dollar sign, never an opener — the same rule
+    // `parseStyled` applies when it renders `\$` as `$`.
+    if (isEscaped(text, open)) {
+      scan = open + 1
+      continue
+    }
+    const match = mathSpanAt(text, open)
+    if (!match) {
       scan = open + 1
       continue
     }
     flushStyled(open)
-    segments.push({ kind: 'math', tex })
-    cursor = open + match[0].length
+    segments.push({ kind: 'math', tex: match.tex })
+    cursor = open + match.length
     scan = cursor
   }
   flushStyled(text.length)

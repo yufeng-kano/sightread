@@ -8,6 +8,7 @@
 services:
   caddy:
     image: caddy:2-alpine
+    container_name: sightread-caddy
     restart: unless-stopped
     ports:
       - "80:80"
@@ -27,6 +28,7 @@ services:
 
   pg:
     image: postgres:16
+    container_name: sightread-pg
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-sightread}
@@ -43,6 +45,7 @@ services:
   api:
     build:
       context: ./apps/api
+    container_name: sightread-api
     restart: unless-stopped
     env_file:
       - .env
@@ -73,6 +76,7 @@ services:
   worker:
     build:
       context: ./apps/api
+    container_name: sightread-worker
     restart: unless-stopped
     env_file:
       - .env
@@ -96,6 +100,7 @@ services:
   web:
     build:
       context: ./apps/web
+    container_name: sightread-web
     restart: unless-stopped
     depends_on:
       - api
@@ -107,6 +112,7 @@ services:
     # newest seven of each. Deliberately a visible shell loop: a cron container would hide
     # the schedule and the rotation in two more places.
     image: postgres:16
+    container_name: sightread-backup
     restart: unless-stopped
     environment:
       PGUSER: ${POSTGRES_USER:-sightread}

@@ -30,3 +30,6 @@ export type IconName =
   | 'upload'
   | 'chevron-right'
   | 'chevron-down'
+  | 'chevron-up'
+  | 'search'
+  | 'panel-left'

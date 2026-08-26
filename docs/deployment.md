@@ -9,6 +9,15 @@ complete and readable on its own and is never merged with the other. The single 
 `docker-compose.only-container-network.yaml`, which is an overlay **by design** — it is meaningless
 on its own and exists precisely to be merged onto the production file.
 
+**Every container is named.** `sightread-pg`, `sightread-api`, `sightread-worker`,
+`sightread-web`, `sightread-caddy`, and `sightread-backup` in production — the same names in
+both full stacks, so `docker logs -f sightread-worker` and `docker exec -it sightread-api sh`
+are one command on a laptop and on the server instead of depending on a generated `-1` suffix
+that also moves when the checkout directory is renamed. The cost, stated once: a container
+name is unique per host, so the local and production stacks cannot run side by side (bring one
+`down` first) and no service can be `--scale`d. Neither is something this stack does — it is
+one server, one instance of each service.
+
 ### `docker-compose.yaml` — local
 
 - Services: `pg`, `api`, `worker`, `web`, `caddy` (plain HTTP on `8080` via `deploy/caddy/Caddyfile.local`, mirroring the production routing so the built web image reaches the API on one origin). Direct ports stay exposed too: web `3000`, api `8000`, pg `${PG_PORT:-5432}` (all localhost only). **Use http://localhost:8080 for the full experience.**

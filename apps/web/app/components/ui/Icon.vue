@@ -189,6 +189,24 @@ defineProps<{ name: IconName }>()
       <path d="m6 9 6 6 6-6" />
     </template>
 
+    <!-- chevron-up: the previous hit, beside chevron-down's next, in the viewer's find bar. -->
+    <template v-else-if="name === 'chevron-up'">
+      <path d="m18 15-6-6-6 6" />
+    </template>
+
+    <!-- search: find in the open document. -->
+    <template v-else-if="name === 'search'">
+      <circle cx="11" cy="11" r="7" />
+      <path d="m21 21-4.35-4.35" />
+    </template>
+
+    <!-- panel-left: shows and hides the result viewer's page rail — the glyph is the
+         layout it toggles, a column beside a body. -->
+    <template v-else-if="name === 'panel-left'">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" />
+    </template>
+
     <!-- check: the confirmation a copy swaps to. -->
     <template v-else>
       <path d="M20 6 9 17l-5-5" />

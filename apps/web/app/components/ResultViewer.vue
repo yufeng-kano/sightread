@@ -1,3 +1,20 @@
+<script lang="ts">
+// Both script blocks compile into one module, so the imports belong to the block that comes
+// first — the whole component reads them, `<script setup>` included.
+import type { ComponentPublicInstance } from 'vue'
+import type { JobResult } from '~/lib/api'
+import { cellGroupsToMarkdown, nodesToMarkdown, type OrphanListContext } from '~/lib/copy'
+import { parseResultMarkdown, type Bbox, type ResultBlock } from '~/lib/markdown'
+
+/**
+ * Module scope, not component state: the rail is a reading preference, so opening the next
+ * document keeps the choice you just made instead of asking for it again. Deliberately not
+ * persisted — it lasts as long as the page is loaded and no longer, which is the lifetime a
+ * preference this small earns.
+ */
+const railOpen = ref(false)
+</script>
+
 <script setup lang="ts">
 /**
  * A finished parse, as a document rather than as a blob of JSON.
@@ -11,26 +28,31 @@
  * different shapes of the same thing: a `JobSummary` on History, a `LibraryDocument` on
  * Files. Neither is this component's business — it renders a result.
  *
- * Two scroll axes again: a page rail on the left, one continuous document on the right.
- * They stay in sync in both directions, and the two mechanics that make that not fight each
- * other are worth stating:
+ * The markdown tab is one continuous scroll, and **the document itself carries no page
+ * labels**: what a reader checks is the transcription, and which page a passage came from is
+ * the pipeline's fact rather than the page's content. The grouping is real all the same — a
+ * figure's crop is addressed by the page it came from — and it is offered as a rail the
+ * header toggles, off by default. Navigation is a thing you ask for; a page number printed
+ * through the prose is a thing you cannot decline (docs/web.md § Result viewer).
+ *
+ * The rail and the find bar **float over** the document rather than sitting beside or above
+ * it: opening either leaves every line of text where it was, and a reader who opens a search
+ * to find the paragraph they are looking at must not have that paragraph move first. The
+ * centered column is what gives them the room.
+ *
+ * Two mechanics keep the rail and the document from fighting each other while both scroll:
  *
  *  - Scrolling sets the active page to the *last* section whose top has passed a reading
  *    line 72px below the pane's top edge — not the first visible one, which flickers between
  *    two pages for the whole length of a page boundary.
  *  - A click sets `scrollTop` from `offsetTop` rather than calling `scrollIntoView`, which
  *    would also scroll the dialog itself inside the viewport, and suppresses the
- *    scroll-driven update briefly so the click's own target wins the race against the
- *    smooth scroll it just started.
+ *    scroll-driven update briefly so the click's own target wins the race against the smooth
+ *    scroll it just started.
  *
  * The element refs are plain variables, not reactive state: they are the DOM, and making
  * them reactive would re-render the document on every scroll frame.
  */
-import type { ComponentPublicInstance } from 'vue'
-import type { JobResult } from '~/lib/api'
-import { cellGroupsToMarkdown, nodesToMarkdown, type OrphanListContext } from '~/lib/copy'
-import { formatBbox, parseResultMarkdown, type Bbox, type ResultBlock } from '~/lib/markdown'
-
 const props = withDefaults(
   defineProps<{
     /** The document's name — the dialog's heading and its accessible name. */
@@ -58,49 +80,34 @@ const pages = computed(() => (props.result ? parseResultMarkdown(props.result.ma
 /** A running job's snapshot: pages keep arriving under this one (docs/api.md § Partial). */
 const partial = computed(() => props.result?.meta.partial === true)
 
-/** Opens on the first page that has figures — the part of a result worth checking first —
- *  falling back to the first page when none do. The document jumps there too: selecting a
- *  page in the rail without moving the document would just be a lie about where you are.
- *  Once only: a partial result re-renders every poll, and re-jumping would yank the
- *  document out from under whoever is already reading it. */
-const activePage = ref(0)
-let jumped = false
-watch(
-  pages,
-  async (list) => {
-    if (jumped || !list.length) {
-      return
-    }
-    jumped = true
-    const first = (list.find((page) => page.figureCount > 0) ?? list[0])?.page ?? 0
-    activePage.value = first
-    if (!first) {
-      return
-    }
-    await nextTick()
-    goToPage(first)
-  },
-  { immediate: true },
+// --- the page rail ---------------------------------------------------------
+
+/** The rail's rows. The figure count is computed here rather than carried through the
+ *  parser: it is what this list draws, not something the document means. */
+const rail = computed(() =>
+  pages.value.map((page) => ({
+    page: page.page,
+    figures: page.blocks.filter((block) => block.kind === 'fig').length,
+  })),
 )
 
-/**
- * The JSON tab replaces the whole body, so coming back mounts a fresh scroller at the top
- * while `activePage` still names wherever the reader had got to — the rail would highlight
- * page 5 over a document showing page 1. `pages` has not changed, so its watcher will not
- * do this for us.
- */
-watch(tab, async (view) => {
-  if (view !== 'markdown' || !activePage.value) {
-    return
-  }
-  await nextTick()
-  goToPage(activePage.value)
-})
-
+const activePage = ref(0)
 const scroller = ref<HTMLElement | null>(null)
 const sections = new Map<number, HTMLElement>()
 /** Set while a click-driven scroll is still settling, so `onScroll` does not overrule it. */
 let suppressUntil = 0
+
+/** A result that arrives, or is replaced by a partial one's next snapshot, must not leave
+ *  the rail pointing at a page the document no longer has. */
+watch(
+  pages,
+  (list) => {
+    if (!list.some((page) => page.page === activePage.value)) {
+      activePage.value = list[0]?.page ?? 0
+    }
+  },
+  { immediate: true },
+)
 
 function registerSection(page: number, el: Element | ComponentPublicInstance | null) {
   if (el instanceof HTMLElement) {
@@ -125,7 +132,8 @@ const READING_LINE = 72
 
 function onScroll() {
   const box = scroller.value
-  if (!box || Date.now() < suppressUntil) {
+  // Nothing reads this while the rail is closed, and the walk is per scroll frame.
+  if (!box || !railOpen.value || Date.now() < suppressUntil) {
     return
   }
   const line = box.scrollTop + READING_LINE
@@ -138,6 +146,57 @@ function onScroll() {
   }
   activePage.value = current
 }
+
+// --- find in document ------------------------------------------------------
+
+const findOpen = ref(false)
+const find = ref<{ focus: () => void } | null>(null)
+
+async function openFind() {
+  findOpen.value = true
+  await nextTick()
+  find.value?.focus()
+}
+
+/**
+ * Ctrl/Cmd+F, taken from the browser while this dialog is open. The document is a scroll
+ * region inside an overlay, and the native find bar cannot usefully reach into it — it
+ * matches text the reader cannot see and scrolls the page behind the dialog. Only on the
+ * markdown tab: the JSON tab is a `<pre>` the browser searches perfectly well.
+ */
+function onFindKey(event: KeyboardEvent) {
+  if (event.key !== 'f' || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) {
+    return
+  }
+  if (tab.value !== 'markdown') {
+    return
+  }
+  event.preventDefault()
+  void openFind()
+}
+
+// Capture, because the modal's own Escape/Tab handler is bound to `document` too and a
+// child's listener is registered first; capture puts this one ahead of it.
+onMounted(() => document.addEventListener('keydown', onFindKey, true))
+onBeforeUnmount(() => document.removeEventListener('keydown', onFindKey, true))
+
+/**
+ * The JSON tab replaces the whole body, so coming back mounts a fresh scroller at the top
+ * while `activePage` still names wherever the reader had got to — the rail would highlight
+ * page 5 over a document showing page 1. The find bar goes the other way: it belongs to the
+ * document, so leaving the document closes it rather than leaving it hanging over JSON.
+ */
+watch(tab, async (view) => {
+  if (view === 'json') {
+    findOpen.value = false
+    return
+  }
+  if (!activePage.value) {
+    return
+  }
+  await nextTick()
+  goToPage(activePage.value)
+})
 
 const meta = computed(() => {
   const result = props.result
@@ -347,7 +406,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
 </script>
 
 <template>
-  <UiModal :title="title" size="lg" tall flush @close="emit('close')">
+  <UiModal :title="title" size="full" tall flush @close="emit('close')">
     <template #title>
       <h2 class="doc-title">{{ title }}</h2>
       <p v-if="meta" class="doc-meta mono">{{ meta }}</p>
@@ -356,6 +415,31 @@ const failedPages = computed(() => props.result?.errors ?? [])
     <!-- A segmented pair, not two loose buttons: they are two views of one thing, and the
          shared border is what says so. -->
     <template #actions>
+      <!-- Two switches for the markdown view. Neither means anything over the JSON tab. -->
+      <template v-if="tab === 'markdown'">
+        <UiButton
+          variant="ghost"
+          size="sm"
+          icon-only
+          class="rail-toggle"
+          :label="t(railOpen ? 'viewer.railHide' : 'viewer.railShow')"
+          :aria-pressed="railOpen ? 'true' : 'false'"
+          @click="railOpen = !railOpen"
+        >
+          <template #icon><UiIcon name="panel-left" /></template>
+        </UiButton>
+        <UiButton
+          variant="ghost"
+          size="sm"
+          icon-only
+          :label="t('viewer.find')"
+          :aria-pressed="findOpen ? 'true' : 'false'"
+          @click="findOpen ? (findOpen = false) : openFind()"
+        >
+          <template #icon><UiIcon name="search" /></template>
+        </UiButton>
+      </template>
+
       <div class="tabs" role="tablist" :aria-label="t('viewer.views')">
         <button
           v-for="view in (['markdown', 'json'] as const)"
@@ -386,11 +470,12 @@ const failedPages = computed(() => props.result?.errors ?? [])
         :body="t('viewer.emptyBody')"
       />
 
-      <div v-else class="markdown" :class="{ degraded: failedPages.length > 0 || partial }">
-        <!-- Spans both columns: facts about the whole document, not about one page. Both
-             can hold at once — a page can fail while the rest is still parsing, and the
-             failure must not silence the live progress. -->
-        <div v-if="failedPages.length || partial" class="doc-notes">
+      <div v-else class="markdown">
+        <!-- What is true of the whole document, not of one page. Always rendered, empty or
+             not, because grid auto-placement would otherwise put the pane in this row.
+             Banner and progress can hold at once — a page can fail while the rest is still
+             parsing, and the failure must not silence the live progress. -->
+        <div class="doc-notes">
           <UiBanner v-if="failedPages.length" class="degraded-note" tone="error">
             {{
               t('viewer.degraded', {
@@ -407,113 +492,123 @@ const failedPages = computed(() => props.result?.errors ?? [])
           </div>
         </div>
 
-        <nav class="page-rail" :aria-label="t('viewer.pagesLabel')">
-          <p class="eyebrow sm page-rail-label">{{ t('viewer.pagesLabel') }}</p>
-          <button
-            v-for="page in pages"
-            :key="page.page"
-            type="button"
-            class="page-button"
-            :class="{ active: page.page === activePage }"
-            :aria-current="page.page === activePage ? 'true' : undefined"
-            @click="goToPage(page.page)"
-          >
-            <span>{{ t('viewer.pageN', { page: page.page }) }}</span>
-            <span v-if="page.figureCount" class="page-figures">
-              {{ t('viewer.figureCount', { count: page.figureCount }) }}
-            </span>
-          </button>
-        </nav>
+        <!-- The rail and the find bar are positioned against this, not laid out in it. -->
+        <div class="pane">
+          <nav v-if="railOpen" class="page-rail" :aria-label="t('viewer.pagesLabel')">
+            <p class="eyebrow sm page-rail-label">{{ t('viewer.pagesLabel') }}</p>
+            <button
+              v-for="entry in rail"
+              :key="entry.page"
+              type="button"
+              class="page-button"
+              :class="{ active: entry.page === activePage }"
+              :aria-current="entry.page === activePage ? 'true' : undefined"
+              @click="goToPage(entry.page)"
+            >
+              <span>{{ t('viewer.pageN', { page: entry.page }) }}</span>
+              <span v-if="entry.figures" class="page-figures">
+                {{ t('viewer.figureCount', { count: entry.figures }) }}
+              </span>
+            </button>
+          </nav>
 
-        <div ref="scroller" class="document" @scroll="onScroll" @copy="onCopy">
-          <section
-            v-for="page in pages"
-            :key="page.page"
-            :ref="(el) => registerSection(page.page, el)"
-            class="page"
-          >
-            <p class="eyebrow sm page-marker" :class="{ current: page.page === activePage }">
-              {{ t('viewer.pageN', { page: page.page }) }}
-            </p>
-            <article class="prose">
-              <template v-for="(block, index) in page.blocks" :key="index">
-                <h3 v-if="block.kind === 'h2'" class="md-h2" :data-level="block.level">
-                  <MdInline :text="block.text" />
-                </h3>
-                <h4 v-else-if="block.kind === 'h3'" class="md-h3" :data-level="block.level">
-                  <MdInline :text="block.text" />
-                </h4>
-                <p v-else-if="block.kind === 'p'" class="md-p"><MdInline :text="block.text" /></p>
+          <MdFind
+            v-if="findOpen"
+            ref="find"
+            class="doc-find"
+            :scroller="scroller"
+            @close="findOpen = false"
+          />
 
-                <!-- KaTeX-typeset, falling back to the verbatim source when it cannot
-                     parse (docs/web.md § Result viewer). -->
-                <MdMath v-else-if="block.kind === 'math'" :tex="block.text" />
+          <div ref="scroller" class="document" @scroll="onScroll" @copy="onCopy">
+            <section
+              v-for="page in pages"
+              :key="page.page"
+              :ref="(el) => registerSection(page.page, el)"
+              class="page"
+            >
+              <article class="prose">
+                <template v-for="(block, index) in page.blocks" :key="index">
+                  <h3 v-if="block.kind === 'h2'" class="md-h2" :data-level="block.level">
+                    <MdInline :text="block.text" />
+                  </h3>
+                  <h4 v-else-if="block.kind === 'h3'" class="md-h3" :data-level="block.level">
+                    <MdInline :text="block.text" />
+                  </h4>
+                  <p v-else-if="block.kind === 'p'" class="md-p"><MdInline :text="block.text" /></p>
 
-                <pre
-                  v-else-if="block.kind === 'code'"
-                  class="md-math"
-                ><code :class="block.lang ? `language-${block.lang}` : undefined">{{ block.text }}</code></pre>
+                  <!-- KaTeX-typeset, falling back to the verbatim source when it cannot
+                       parse (docs/web.md § Result viewer). -->
+                  <MdMath v-else-if="block.kind === 'math'" :tex="block.text" />
 
-                <component
-                  :is="block.ordered ? 'ol' : 'ul'"
-                  v-else-if="block.kind === 'list'"
-                  class="md-list"
-                  :start="block.start"
-                >
-                  <li v-for="(item, itemIndex) in block.items" :key="itemIndex">
-                    <MdInline :text="item" />
-                  </li>
-                </component>
+                  <pre
+                    v-else-if="block.kind === 'code'"
+                    class="md-math"
+                  ><code :class="block.lang ? `language-${block.lang}` : undefined">{{ block.text }}</code></pre>
 
-                <!-- Its own scroll axis: a table wider than the reading measure slides in
-                     place instead of stretching the page (docs/web.md § Result viewer). -->
-                <div v-else-if="block.kind === 'table'" class="md-table-wrap">
-                  <table class="md-table">
-                    <thead>
-                      <tr>
-                        <th v-for="(cell, column) in block.header" :key="column" scope="col">
-                          <MdInline :text="cell" />
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
-                        <td v-for="(cell, column) in row" :key="column">
-                          <MdInline :text="cell" />
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                <!-- The stored crop when one exists; the dashed frame when it does not
-                     (old results, failed crop). `data-md` is what a copy hands back. -->
-                <figure v-else class="md-figure" :data-md="figureSource(page.page, block)">
-                  <img
-                    v-if="figureBase && !failedCrops.has(figureKey(page.page, block.bbox))"
-                    class="figure-image"
-                    :src="figureUrl(page.page, block.bbox)"
-                    :alt="block.caption || block.id"
-                    loading="lazy"
-                    @error="failedCrops.add(figureKey(page.page, block.bbox))"
+                  <component
+                    :is="block.ordered ? 'ol' : 'ul'"
+                    v-else-if="block.kind === 'list'"
+                    class="md-list"
+                    :start="block.start"
                   >
-                  <div v-else class="figure-frame">
-                    <UiIcon name="scan-text" />
-                    <span>{{ t('viewer.figurePending') }}</span>
-                  </div>
-                  <figcaption class="figure-caption mono">
-                    <span><MdInline :text="block.caption || block.id" /></span>
-                    <span>{{ formatBbox(block.bbox) }}</span>
-                  </figcaption>
-                </figure>
-              </template>
-            </article>
-          </section>
+                    <li v-for="(item, itemIndex) in block.items" :key="itemIndex">
+                      <MdInline :text="item" />
+                    </li>
+                  </component>
 
-          <!-- Where the next page will land, while the parse is still running. -->
-          <section v-if="partial" class="page" aria-hidden="true">
-            <UiSkeleton class="page-skeleton" :rows="4" />
-          </section>
+                  <!-- Its own scroll axis: a table wider than the reading measure slides in
+                       place instead of stretching the page (docs/web.md § Result viewer). -->
+                  <div v-else-if="block.kind === 'table'" class="md-table-wrap">
+                    <table class="md-table">
+                      <thead>
+                        <tr>
+                          <th v-for="(cell, column) in block.header" :key="column" scope="col">
+                            <MdInline :text="cell" />
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
+                          <td v-for="(cell, column) in row" :key="column">
+                            <MdInline :text="cell" />
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <!-- The stored crop when one exists; the dashed frame when it does not
+                       (old results, failed crop). `data-md` is what a copy hands back. -->
+                  <figure v-else class="md-figure" :data-md="figureSource(page.page, block)">
+                    <img
+                      v-if="figureBase && !failedCrops.has(figureKey(page.page, block.bbox))"
+                      class="figure-image"
+                      :src="figureUrl(page.page, block.bbox)"
+                      :alt="block.caption || block.id"
+                      loading="lazy"
+                      @error="failedCrops.add(figureKey(page.page, block.bbox))"
+                    >
+                    <div v-else class="figure-frame">
+                      <UiIcon name="scan-text" />
+                      <span>{{ t('viewer.figurePending') }}</span>
+                    </div>
+                    <!-- Only the caption the page carried: the generated `figN` name and
+                         the bbox are how a crop is addressed, not something a reader was
+                         asked to read. Copy still hands both back, from `data-md` above. -->
+                    <figcaption v-if="block.caption" class="figure-caption">
+                      <MdInline :text="block.caption" />
+                    </figcaption>
+                  </figure>
+                </template>
+              </article>
+            </section>
+
+            <!-- Where the next page will land, while the parse is still running. -->
+            <section v-if="partial" class="page" aria-hidden="true">
+              <UiSkeleton class="page-skeleton" :rows="4" />
+            </section>
+          </div>
         </div>
       </div>
     </div>
@@ -602,22 +697,26 @@ const failedPages = computed(() => props.result?.errors ?? [])
 
 /* --- Markdown view -------------------------------------------------------- */
 
+/* The head band always has its own row, even when it is empty: a warning about the whole
+   document and the live progress note push the pane down rather than scrolling away inside
+   it. The rail and the find bar do the opposite — they float (see `.pane`). */
 .markdown {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  /* `minmax(0, 1fr)` and not the implicit `auto` track it would otherwise get: an auto
+     column is sized by its content, so the widest line in the document would stretch the
+     pane — and with it the dialog — past the window instead of scrolling inside it. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   height: 100%;
 }
 
-/* A warning about the whole document sits above both columns and pushes them down, rather
-   than scrolling away inside one of them. */
-.markdown.degraded {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
-.doc-notes {
-  grid-column: 1 / -1;
+/* The positioning context for everything that floats over the document. */
+.pane {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  min-width: 0;
 }
 
 .degraded-note {
@@ -636,16 +735,34 @@ const failedPages = computed(() => props.result?.errors ?? [])
   font-size: var(--text-xs);
 }
 
+/* Over the document, not beside it: the text does not move when the rail opens. At a 70%
+   column there is a margin on the left for it to sit in, so on a wide dialog it covers
+   nothing but empty page. */
 .page-rail {
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  width: 148px;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: var(--space-4) var(--space-3);
   background: var(--rail);
   border-right: 1px solid var(--line);
+  box-shadow: var(--shadow-menu);
+}
+
+/* Top right of the pane, clear of the rail whether it is open or not. */
+.doc-find {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-6);
+  z-index: 3;
+  width: min(400px, calc(100% - var(--space-12)));
 }
 
 .page-rail-label {
@@ -677,6 +794,8 @@ const failedPages = computed(() => props.result?.errors ?? [])
   color: var(--ink);
 }
 
+/* Only the page you are reading is marked in the accent — that is what makes the rail a
+   position indicator rather than a list of numbers. */
 .page-button.active {
   background: var(--rail-active);
   color: var(--ink);
@@ -690,72 +809,66 @@ const failedPages = computed(() => props.result?.errors ?? [])
   color: var(--faint);
 }
 
-/* One continuous scroll of every page — the rail selects, it does not filter. A reader
-   comparing two pages should not have to click between them. */
+/* One continuous scroll of the whole document — the rail selects, it does not filter. A
+   reader comparing two pages should not have to click between them. */
 .document {
   min-width: 0;
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 0 var(--space-10) var(--space-12);
+  padding: var(--space-7) var(--space-10) var(--space-12);
 }
 
-/* The reading measure is the page, centered in the pane — on a wide dialog the text sits
-   in the middle rather than hugging the rail (docs/web.md § Result viewer). */
+/* The column, centered in the pane. The page boundary carries no rule and no label: it is
+   the grouping the data has, not a division the reader is asked to see, so consecutive pages
+   are separated by exactly the gap the blocks inside one page already keep. */
 .page {
-  max-width: 60ch;
+  width: 70%;
   margin-inline: auto;
-  padding: var(--space-7) 0 var(--space-1);
-  border-top: 1px solid var(--line);
 }
 
-/* Only the page you are reading is marked in the accent — that is what makes it a position
-   indicator rather than a repeated decoration down the document. */
-.page-marker {
-  margin-bottom: 18px;
+.page + .page {
+  margin-top: 18px;
 }
 
-.page-marker.current {
-  color: var(--accent);
-}
-
-/* A reading measure, not the pane's width: 60ch is where a 14px line stops being a line and
-   starts being a paragraph you lose your place in. */
 .prose {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  max-width: 60ch;
+  gap: 20px;
 }
 
 .md-h2 {
-  font-size: var(--display-md);
+  font-size: var(--display-lg);
   letter-spacing: var(--tracking-heading);
 }
 
 .md-h3 {
   margin: 0;
   font-family: var(--font-display);
-  font-size: var(--display-xs);
+  font-size: var(--display-sm);
   font-weight: var(--weight-semibold);
   line-height: 1.3;
 }
 
 .md-p {
   color: var(--ink-soft);
-  font-size: var(--text-base);
+  font-size: var(--text-read);
   line-height: 1.75;
   text-wrap: pretty;
 }
 
 /* A formula is read, not scanned, so it keeps the body's colour and size — but it scrolls
-   sideways rather than wrapping, because a re-wrapped equation is a different equation. */
+   sideways rather than wrapping, because a re-wrapped equation is a different equation.
+   Sideways only: `overflow-y` is stated because CSS computes a `visible` axis to `auto` the
+   moment the other one is not, and an equation behind a vertical scrollbar is half an
+   equation. Height is whatever the content needs. */
 .md-math {
   margin: 0;
   overflow-x: auto;
+  overflow-y: hidden;
   color: var(--ink-soft);
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-read-sm);
   line-height: 1.7;
   white-space: pre;
 }
@@ -766,7 +879,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
   margin: 0;
   padding-left: var(--space-5);
   color: var(--ink-soft);
-  font-size: var(--text-base);
+  font-size: var(--text-read);
   line-height: 1.75;
 }
 
@@ -787,7 +900,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
   min-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
-  font-size: var(--text-sm);
+  font-size: var(--text-read-sm);
   font-variant-numeric: tabular-nums;
 }
 
@@ -801,7 +914,7 @@ const failedPages = computed(() => props.result?.errors ?? [])
 .md-table th {
   padding: var(--cell-y-tight) var(--space-4) var(--cell-y-tight) 0;
   text-align: left;
-  font-size: var(--text-3xs);
+  font-size: var(--text-2xs);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-label);
   text-transform: uppercase;
@@ -819,13 +932,18 @@ const failedPages = computed(() => props.result?.errors ?? [])
   border-bottom: none;
 }
 
+/* A figure is centered in the column, caption and all: a crop is narrower than the measure
+   far more often than not, and left-aligning it hangs it off an edge the text does not
+   share. */
 .md-figure {
   margin: 0;
+  text-align: center;
 }
 
 /* The stored crop, at the width the prose gives it and never more. */
 .figure-image {
   display: block;
+  margin-inline: auto;
   max-width: 100%;
   border: 1px solid var(--line-soft);
   background: var(--paper);
@@ -850,25 +968,18 @@ const failedPages = computed(() => props.result?.errors ?? [])
   height: 22px;
 }
 
+/* Prose now that the coordinates have gone from beside it: it wraps to as many lines as
+   the caption needs instead of being truncated to fit next to a readout. */
 .figure-caption {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-4);
   margin-top: var(--space-2);
-  font-size: var(--text-2xs);
+  font-size: var(--text-xs);
+  line-height: 1.6;
   color: var(--faint);
-}
-
-.figure-caption span:first-child {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* Where the next page will land while the parse runs. */
 .page-skeleton {
-  max-width: 60ch;
+  width: 100%;
 }
 
 /* KaTeX brings its own faces and sizing; the span only needs to not fight the line. */
@@ -902,19 +1013,30 @@ const failedPages = computed(() => props.result?.errors ?? [])
   white-space: pre;
 }
 
-@media (max-width: 640px) {
-  /* No room for a rail beside the document on a phone: the page markers in the document
-     itself are the navigation. */
-  .markdown {
-    grid-template-columns: minmax(0, 1fr);
+/* A percentage column needs a floor: below the shell breakpoint 70% of the pane is a
+   gutter wider than the text it frames. */
+@media (max-width: 900px) {
+  .page,
+  .page-skeleton {
+    width: 100%;
   }
+}
 
-  .page-rail {
+@media (max-width: 640px) {
+  /* No room for a rail over the document on a phone, so its switch goes too — a header this
+     narrow has no space for a control that cannot do anything. */
+  .page-rail,
+  .rail-toggle {
     display: none;
   }
 
+  .doc-find {
+    right: var(--space-4);
+    width: calc(100% - var(--space-8));
+  }
+
   .document {
-    padding: 0 var(--space-5) var(--space-10);
+    padding: var(--space-7) var(--space-5) var(--space-10);
   }
 }
 </style>

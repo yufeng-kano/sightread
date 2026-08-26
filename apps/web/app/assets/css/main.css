@@ -64,6 +64,14 @@
   --danger-edge: #e0b6ac;
   --danger-hover: #f7f0ee;
 
+  /* --- Color: find --------------------------------------------------------
+     The result viewer's search. Every hit takes the accent as a wash and the one you are
+     on takes it solid, because "where am I in 40 hits" is the question the bar exists to
+     answer. The accent is data here, not decoration: a hit is a position in a document. */
+  --find: rgb(23 96 125 / 18%);
+  --find-current: #17607d;
+  --find-current-fg: #fcfcfd;
+
   /* --- Color: interaction -------------------------------------------------- */
   --overlay: rgb(21 24 28 / 42%);
   /* The only shadow in the system: dialogs, and the sidebar when it is a drawer. */
@@ -116,6 +124,12 @@
   --text-xs: 12px;
   --text-sm: 13px;
   --text-base: 14px;
+
+  /* The result viewer is the one surface in the app that is a document rather than an
+     interface: read continuously instead of scanned, so it gets its own two sizes rather
+     than borrowing a UI scale tuned for density (docs/web.md § Result viewer). */
+  --text-read: 16px;
+  --text-read-sm: 14px;
 
   --display-2xs: 15px;
   --display-xs: 17px;
@@ -223,6 +237,9 @@
     --danger: #e08b76;
     --danger-edge: #6d3628;
     --danger-hover: #221715;
+    --find: rgb(106 169 196 / 26%);
+    --find-current: #6aa9c4;
+    --find-current-fg: #10161a;
     --overlay: rgb(6 8 10 / 62%);
     --shadow-dialog: 0 24px 60px rgb(0 0 0 / 55%);
     --menu-surface: rgb(38 43 50 / 98%);
