@@ -268,11 +268,14 @@ async def fetch_connection_models(
 
 class UpstreamError(Exception):
     """An upstream call failed. `fatal` marks a failure that will repeat for every page,
-    so the caller should abort the whole job instead of burning pages on it."""
+    so the caller should abort the whole job instead of burning pages on it; `transient`
+    marks one the same request may not repeat, so the caller retries it
+    (docs/parsing.md § Upstream usage)."""
 
-    def __init__(self, message: str, *, fatal: bool = False) -> None:
+    def __init__(self, message: str, *, fatal: bool = False, transient: bool = False) -> None:
         super().__init__(message)
         self.fatal = fatal
+        self.transient = transient
 
 
 class RateLimited(UpstreamError):
@@ -281,6 +284,19 @@ class RateLimited(UpstreamError):
     def __init__(self, retry_after: float | None = None) -> None:
         super().__init__("The upstream rate-limited this key")
         self.retry_after = retry_after
+
+
+class EmptyCompletion(UpstreamError):
+    """The upstream answered without an error and without any text.
+
+    Ambiguous on its own — a blank page transcribes to nothing, and so does a hiccup — so
+    it is transient; a page that stays empty through every attempt is a blank page
+    (docs/parsing.md § Upstream usage)."""
+
+    def __init__(self) -> None:
+        super().__init__("The upstream returned an empty completion", transient=True)
+        # What the empty answer was billed, for the caller that accepts it as a blank page.
+        self.usage = Usage(prompt_tokens=0, completion_tokens=0, cost=Decimal("0"))
 
 
 class PaymentRequired(UpstreamError):
@@ -390,15 +406,30 @@ def _usage(payload: dict, kind: str) -> Usage:
 
 def _message_text(payload: dict) -> str:
     choices = payload.get("choices") or []
-    if not choices:
-        raise UpstreamError("The upstream returned no completion")
+    if not choices or not isinstance(choices[0], dict):
+        raise EmptyCompletion()
     content = (choices[0].get("message") or {}).get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
         # Some providers answer with content parts instead of a plain string.
         return "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    if content is None:
+        # How some servers say "nothing": a page with nothing to transcribe. Only a choice
+        # that finished on its own is that answer; one cut short is a failed call, and
+        # one that does not say is ambiguous (docs/parsing.md § Upstream usage).
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason == "stop":
+            return ""
+        if finish_reason is None:
+            raise EmptyCompletion()
+        raise UpstreamError("The upstream ended the completion early", transient=True)
     raise UpstreamError("The upstream returned an unreadable completion")
+
+
+def _is_transient(status: int) -> bool:
+    """408 and 5xx may not repeat; any other 4xx is the request's own fault and will."""
+    return status == 408 or status >= 500
 
 
 def _raise_for_error_payload(payload: dict) -> None:
@@ -411,7 +442,9 @@ def _raise_for_error_payload(payload: dict) -> None:
         raise PaymentRequired()
     if code == 429:
         raise RateLimited()
-    raise UpstreamError(f"The upstream reported an error ({code or 'unknown'})")
+    raise UpstreamError(
+        f"The upstream reported an error ({code or 'unknown'})", transient=_is_transient(code)
+    )
 
 
 async def _chat_with_image(
@@ -451,23 +484,31 @@ async def _chat_with_image(
             if response.status_code in (401, 403):
                 raise UpstreamError("The upstream rejected the stored key", fatal=True)
             if response.status_code >= 400:
-                raise UpstreamError(f"The upstream returned {response.status_code}")
+                raise UpstreamError(
+                    f"The upstream returned {response.status_code}",
+                    transient=_is_transient(response.status_code),
+                )
             raw = await _read_body_capped(response, max_bytes)
     except httpx.HTTPError as exc:
-        raise UpstreamError("The upstream was unreachable") from exc
+        raise UpstreamError("The upstream was unreachable", transient=True) from exc
     except ResponseTooLarge as exc:
         raise UpstreamError("The upstream response exceeded the size cap") from exc
 
     try:
         payload = json.loads(raw)
     except ValueError as exc:
-        raise UpstreamError("The upstream returned a non-JSON body") from exc
+        raise UpstreamError("The upstream returned a non-JSON body", transient=True) from exc
     if not isinstance(payload, dict):
         # A non-object body (e.g. `[]`) is the endpoint's fault — a failed page, never
         # an internal error that kills the whole job.
         raise UpstreamError("The upstream returned an unreadable body")
     _raise_for_error_payload(payload)
-    return _message_text(payload), _usage(payload, connection.kind)
+    try:
+        text = _message_text(payload)
+    except EmptyCompletion as exc:
+        exc.usage = _usage(payload, connection.kind)
+        raise
+    return text, _usage(payload, connection.kind)
 
 
 async def transcribe_page(

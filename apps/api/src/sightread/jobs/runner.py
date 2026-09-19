@@ -32,6 +32,8 @@ from ..parsing.markdown import PageMarkdown, assemble
 from ..parsing.profiles import transcription_prompt_template
 from ..upstream.openrouter import (
     Connection,
+    EmptyCompletion,
+    PageTranscription,
     PaymentRequired,
     RateLimited,
     UpstreamError,
@@ -44,7 +46,8 @@ from .queue import parse_pages_spec
 
 logger = logging.getLogger(__name__)
 
-# 429 retry policy for one upstream call (docs/parsing.md § OpenRouter usage).
+# Retry policy for one upstream call — 429s and transient failures alike
+# (docs/parsing.md § Upstream usage).
 VISION_MAX_ATTEMPTS = 4
 VISION_BACKOFF_BASE_SECONDS = 1.0
 
@@ -109,6 +112,8 @@ class RunState:
     """Cross-page state for one run: what the fan-out has to agree about."""
 
     budget: VisionBudget
+    # For log lines only: page tasks see the state, not the job row.
+    job_id: str = ""
     # UPSTREAM_RESPONSE_MAX_BYTES, carried here so page tasks need no Settings.
     max_response_bytes: int = 33_554_432
     payment_failures: int = 0
@@ -183,20 +188,31 @@ def job_prompt(job: Job) -> str:
 
 
 async def _call_upstream(state: RunState, call):
-    """Run one upstream call under the job's budget, backing off on 429.
+    """Run one upstream call under the job's budget, backing off on 429 and on transient
+    failures.
 
     Each rate limit also halves this job's concurrency, so a job that is being throttled
-    stops fighting the throttle.
+    stops fighting the throttle. A transient failure does not: a flaky upstream is not
+    asking for less traffic. The backoff sleeps outside the slot, so a waiting page never
+    holds up one that could run.
     """
     for attempt in range(VISION_MAX_ATTEMPTS):
+        last = attempt == VISION_MAX_ATTEMPTS - 1
         async with state.budget.slot():
             try:
                 return await call()
             except RateLimited as exc:
-                if attempt == VISION_MAX_ATTEMPTS - 1:
+                if last:
                     raise
+                throttled = True
                 delay = exc.retry_after or VISION_BACKOFF_BASE_SECONDS * (2**attempt)
-        await state.budget.halve()
+            except UpstreamError as exc:
+                if last or not exc.transient:
+                    raise
+                throttled = False
+                delay = VISION_BACKOFF_BASE_SECONDS * (2**attempt)
+        if throttled:
+            await state.budget.halve()
         await asyncio.sleep(delay)
     raise RateLimited()
 
@@ -218,9 +234,15 @@ async def _guarded_call(state: RunState, outcome: PageOutcome, call):
     except RateLimited:
         outcome.error = "rate limited"
         return None
+    except EmptyCompletion as exc:
+        # Empty through every attempt: the page has nothing on it, which is a result and
+        # not a failure (docs/parsing.md § Upstream usage).
+        result = PageTranscription(markdown="", usage=exc.usage)
     except UpstreamError as exc:
         if exc.fatal:
             raise JobAborted("the upstream rejected the stored key") from None
+        # The message is a status code or a fixed phrase — never credentials or content.
+        logger.warning("job %s page %d upstream call failed: %s", state.job_id, outcome.page, exc)
         outcome.error = "upstream call failed"
         return None
 
@@ -476,6 +498,7 @@ async def run_job(
     work_dir.mkdir(parents=True, exist_ok=True)
     state = RunState(
         budget=VisionBudget(settings.vision_concurrency_per_job),
+        job_id=str(job.id),
         max_response_bytes=settings.upstream_response_max_bytes,
         figures_dir=figures_root / str(job.id),
         figures_per_page=settings.figures_per_page_max,

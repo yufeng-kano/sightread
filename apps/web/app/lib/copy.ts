@@ -223,6 +223,14 @@ function blockToMarkdown(node: MarkdownNode, partialBlocks?: ReadonlySet<string>
     const level = Number.parseInt(attribute(node, 'data-level') ?? '', 10) || fallback
     return `${'#'.repeat(level)} ${inlineText(node).trim()}`
   }
+  if (names.includes('md-toc')) {
+    // Rows go back one per line, as the contents page wrote them: blank lines between
+    // them would make each a paragraph of its own. The leader's dots ride on `data-src`.
+    return children(node)
+      .filter((child) => tag(child) === 'p')
+      .map((row) => collapseWhitespace(inlineText(row)))
+      .join('\n')
+  }
   switch (tag(node)) {
     case 'table':
       return tableToMarkdown(node)

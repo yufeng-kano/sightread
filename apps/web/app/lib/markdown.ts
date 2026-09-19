@@ -9,7 +9,8 @@
  *
  * This is deliberately not a general markdown parser. It understands exactly the shapes the
  * transcription prompt asks the model for: headings, paragraphs, lists, pipe tables, fenced
- * code, display math and figure placeholders (docs/parsing.md § Prompt). Anything else stays
+ * code, display math, figure placeholders (docs/parsing.md § Prompt) and the contents-page
+ * lines a book arrives with. Anything else stays
  * a paragraph, which renders as its own source text rather than disappearing.
  *
  * It is also flat, and knowingly so: a nested list comes out as one level, and a fence is
@@ -34,6 +35,18 @@ export type ResultBlock =
   | { kind: 'code'; text: string; lang: string | null }
   | { kind: 'table'; header: string[]; rows: string[][] }
   | { kind: 'fig'; id: string; bbox: Bbox; caption: string | null }
+  | { kind: 'toc'; entries: TocEntry[] }
+
+/**
+ * One line of a contents page. `title + leader + page` is the source line exactly — the
+ * leader is drawn rather than printed, and copy hands its characters back.
+ */
+export interface TocEntry {
+  title: string
+  /** What sat between the title and the page number: dots, or just the space. */
+  leader: string
+  page: string | null
+}
 
 export interface ResultPageBlocks {
   /** The viewer never prints this — it addresses a figure's crop with it. */
@@ -47,8 +60,46 @@ const HEADING = /^(#{1,6})\s+(.*)$/
 const COMMENT = /^<!--.*-->$/
 /** `- item`, `* item`, `+ item`, `1. item`, `2) item`. */
 const LIST_ITEM = /^([-*+]|\d{1,9}[.)])\s+(.*)$/
-/** A display-math fence: `$$` alone on its line. */
+/** A display-math fence: `$$` alone on its line, or sharing a line with the formula. */
 const MATH_FENCE = '$$'
+
+/**
+ * Whether a line opens display math. `$$` alone does; so does `$$x = 1$$` on one line —
+ * how most models write a numbered equation — and `$$x = 1` whose closing dollars come
+ * lines later. A line with a second `$$` anywhere but its end (`$$x$$ where x is…`) is
+ * prose: read as an opener it would swallow the document up to the next fence.
+ */
+function opensMath(line: string): boolean {
+  if (!line.startsWith(MATH_FENCE)) {
+    return false
+  }
+  const again = line.indexOf(MATH_FENCE, MATH_FENCE.length)
+  return again === -1 || (again === line.length - MATH_FENCE.length && again > MATH_FENCE.length)
+}
+
+/** A page number as a contents page prints one: arabic or roman, possibly emphasised. */
+const TOC_PAGE = String.raw`(?:\*\*|__)?(?:\d+|[ivxlcdm]+)(?:\*\*|__)?`
+/** `Title . . . . 13` / `Title.....13`: a dot leader of four or more, then the page. */
+const TOC_LEADER = new RegExp(String.raw`^(.*?\S)(\s*(?:\.\s*){4,})(${TOC_PAGE})$`, 'i')
+/** A row of the same run without a leader — `**1 Introduction** **13**`. Digits only:
+ *  with no leader to vouch for it, a trailing "mix" or "civil" is a word, not a numeral. */
+const TOC_BARE = /^(.*?\S)(\s+)((?:\*\*|__)?\d+(?:\*\*|__)?)$/
+
+/**
+ * The lines of a paragraph as contents-page rows, or null when none of them carries a dot
+ * leader — which is what tells a contents page from prose that happens to wrap.
+ */
+function tocEntries(rows: string[]): TocEntry[] | null {
+  if (!rows.some((row) => TOC_LEADER.test(row))) {
+    return null
+  }
+  return rows.map((row) => {
+    const match = TOC_LEADER.exec(row) ?? TOC_BARE.exec(row)
+    return match
+      ? { title: match[1] ?? '', leader: match[2] ?? '', page: match[3] ?? null }
+      : { title: row, leader: '', page: null }
+  })
+}
 /** A fenced code block's opening or closing line, with its optional info string. */
 const CODE_FENCE = /^(?:```|~~~)\s*([^\s`]*)\s*$/
 
@@ -79,7 +130,7 @@ function isOrdered(marker: string): boolean {
 function startsBlock(line: string, next = ''): boolean {
   return (
     !line ||
-    line === MATH_FENCE ||
+    opensMath(line) ||
     CODE_FENCE.test(line) ||
     isTableStart(line, next) ||
     line.startsWith('#') ||
@@ -183,21 +234,34 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
     // Display math is the one block whose line breaks *are* its content: an aligned group
     // of equations joined into a paragraph is no longer the formula the page carried, and
     // the prompt asks for formulas to be kept.
-    if (line === MATH_FENCE) {
-      const rows: string[] = []
+    if (opensMath(line)) {
+      // The dollars may share a line with the formula at either end, so what follows the
+      // opener and what precedes the closer are rows like any other.
+      const opening = line.slice(MATH_FENCE.length)
+      if (opening.endsWith(MATH_FENCE)) {
+        page().blocks.push({ kind: 'math', text: opening.slice(0, -MATH_FENCE.length).trim() })
+        continue
+      }
+      const rows: string[] = opening.trim() ? [opening.trim()] : []
       let cursor = index + 1
+      let closed = false
       // A page marker closes an unclosed fence: a model that forgets the closing `$$` must
       // not swallow the rest of the document into one formula.
-      while (
-        cursor < lines.length &&
-        (lines[cursor] ?? '').trim() !== MATH_FENCE &&
-        !PAGE_MARKER.test((lines[cursor] ?? '').trim())
-      ) {
-        rows.push((lines[cursor] ?? '').trimEnd())
+      while (cursor < lines.length && !PAGE_MARKER.test((lines[cursor] ?? '').trim())) {
+        const row = (lines[cursor] ?? '').trimEnd()
+        if (row.endsWith(MATH_FENCE)) {
+          const last = row.slice(0, -MATH_FENCE.length).trimEnd()
+          if (last.trim()) {
+            rows.push(last)
+          }
+          closed = true
+          break
+        }
+        rows.push(row)
         cursor += 1
       }
       // Past the closing fence, or back onto the page marker so the next pass sees it.
-      index = (lines[cursor] ?? '').trim() === MATH_FENCE ? cursor : cursor - 1
+      index = closed ? cursor : cursor - 1
       page().blocks.push({ kind: 'math', text: rows.join('\n') })
       continue
     }
@@ -298,7 +362,10 @@ export function parseResultMarkdown(markdown: string): ResultPageBlocks[] {
       cursor += 1
     }
     index = cursor - 1
-    page().blocks.push({ kind: 'p', text: paragraph.join(' ') })
+    // A contents page keeps its lines: joined, a book's `1.1 Title . . . . 13` rows read
+    // as one run-on paragraph of dots (docs/web.md § Result viewer).
+    const entries = tocEntries(paragraph)
+    page().blocks.push(entries ? { kind: 'toc', entries } : { kind: 'p', text: paragraph.join(' ') })
   }
 
   return pages

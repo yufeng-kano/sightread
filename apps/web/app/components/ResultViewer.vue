@@ -578,6 +578,24 @@ const failedPages = computed(() => props.result?.errors ?? [])
                     </table>
                   </div>
 
+                  <!-- A contents page, one row per source line. The leader is drawn, so it
+                       fills the column instead of wrapping; its `data-src` is the dots the
+                       line carried, which copy hands back (docs/web.md § Result viewer). -->
+                  <div v-else-if="block.kind === 'toc'" class="md-toc">
+                    <p v-for="(entry, entryIndex) in block.entries" :key="entryIndex" class="md-toc-row">
+                      <span class="md-toc-title"><MdInline :text="entry.title" /></span>
+                      <template v-if="entry.page !== null">
+                        <span
+                          class="md-toc-leader"
+                          :class="{ dotted: entry.leader.includes('.') }"
+                          :data-src="entry.leader"
+                          aria-hidden="true"
+                        />
+                        <span class="md-toc-page"><MdInline :text="entry.page" /></span>
+                      </template>
+                    </p>
+                  </div>
+
                   <!-- The stored crop when one exists; the dashed frame when it does not
                        (old results, failed crop). `data-md` is what a copy hands back. -->
                   <figure v-else class="md-figure" :data-md="figureSource(page.page, block)">
@@ -875,6 +893,38 @@ const failedPages = computed(() => props.result?.errors ?? [])
 
 /* Markers stay outside the measure, so the text edge lines up with the paragraphs above
    and below it rather than being indented away from them. */
+/* A contents row: title left, page right, the leader stretched between them on the text's
+   baseline. A long title wraps inside its own span and the number stays on the last line. */
+.md-toc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  color: var(--ink-soft);
+  font-size: var(--text-read);
+  line-height: 1.75;
+}
+
+.md-toc-row {
+  display: flex;
+  align-items: last baseline;
+  margin: 0;
+}
+
+.md-toc-leader {
+  flex: 1;
+  min-width: var(--space-5);
+  margin-inline: var(--space-2);
+}
+
+.md-toc-leader.dotted {
+  border-bottom: 1px dotted var(--faint);
+}
+
+.md-toc-page {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .md-list {
   margin: 0;
   padding-left: var(--space-5);

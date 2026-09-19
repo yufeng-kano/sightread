@@ -219,7 +219,8 @@ async def test_second_identical_upload_is_served_from_the_cache(
 async def test_a_page_that_cannot_be_transcribed_fails_alone(
     api_client, sessionmaker, documents
 ) -> None:
-    responses = [httpx.Response(500), _completion(VISION_MARKDOWN)]
+    # A 400 is not retried, so the second response is the second page's.
+    responses = [httpx.Response(400), _completion(VISION_MARKDOWN)]
     respx.post(CHAT_URL).mock(side_effect=responses)
 
     accepted = await _upload(api_client, documents["mixed_pdf"], pages="1,2")
@@ -237,7 +238,7 @@ async def test_a_page_that_cannot_be_transcribed_fails_alone(
 async def test_a_degraded_result_is_never_served_from_the_cache(
     api_client, sessionmaker, documents
 ) -> None:
-    respx.post(CHAT_URL).mock(side_effect=[httpx.Response(500), _completion(VISION_MARKDOWN)])
+    respx.post(CHAT_URL).mock(side_effect=[httpx.Response(400), _completion(VISION_MARKDOWN)])
     await _upload(api_client, documents["mixed_pdf"], pages="1,2")
     await _drain_queue(api_client, sessionmaker)
 
@@ -260,7 +261,7 @@ async def test_a_degraded_result_is_never_served_from_the_cache(
 async def test_a_wholly_failed_job_names_the_page_reasons(
     api_client, sessionmaker, documents
 ) -> None:
-    respx.post(CHAT_URL).mock(return_value=httpx.Response(500))
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(400))
 
     accepted = await _upload(api_client, documents["text_pdf"])
     job_id = accepted.json()["job_id"]
@@ -354,6 +355,99 @@ async def test_rate_limits_back_off_and_shrink_the_job_budget(
     status = (await api_client.get(f"/v1/jobs/{job_id}")).json()
     assert status["status"] == "succeeded"
     assert respx.calls.call_count == 2
+
+
+@respx.mock
+async def test_a_transient_failure_is_retried_before_the_page_is_given_up(
+    api_client, sessionmaker, documents, monkeypatch
+) -> None:
+    monkeypatch.setattr("sightread.jobs.runner.VISION_BACKOFF_BASE_SECONDS", 0.001)
+    respx.post(CHAT_URL).mock(
+        side_effect=[
+            httpx.Response(503),
+            httpx.ConnectError("reset"),
+            _completion(VISION_MARKDOWN),
+        ]
+    )
+
+    accepted = await _upload(api_client, documents["text_pdf"])
+    job_id = accepted.json()["job_id"]
+    await _drain_queue(api_client, sessionmaker)
+
+    result = (await api_client.get(f"/v1/jobs/{job_id}/result")).json()
+    assert result["errors"] == []
+    assert result["markdown"]
+    assert respx.calls.call_count == 3
+
+
+@respx.mock
+async def test_a_failure_that_stays_transient_fails_the_page_after_the_last_attempt(
+    api_client, sessionmaker, documents, monkeypatch
+) -> None:
+    monkeypatch.setattr("sightread.jobs.runner.VISION_BACKOFF_BASE_SECONDS", 0.001)
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(500))
+
+    accepted = await _upload(api_client, documents["text_pdf"])
+    job_id = accepted.json()["job_id"]
+    await _drain_queue(api_client, sessionmaker)
+
+    status = (await api_client.get(f"/v1/jobs/{job_id}")).json()
+    assert status["status"] == "failed"
+    assert status["error"] == "no page could be parsed (page 1: upstream call failed)"
+    assert respx.calls.call_count == 4
+
+
+@respx.mock
+async def test_a_failure_that_would_repeat_is_not_retried(
+    api_client, sessionmaker, documents
+) -> None:
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(400))
+
+    await _upload(api_client, documents["text_pdf"])
+    await _drain_queue(api_client, sessionmaker)
+
+    assert respx.calls.call_count == 1
+
+
+@respx.mock
+async def test_a_page_the_model_has_nothing_to_say_about_is_blank_not_failed(
+    api_client, sessionmaker, documents, monkeypatch
+) -> None:
+    """The blank verso before a book chapter: the prompt drops its page number, and some
+    servers say "nothing" as a null content rather than an empty string."""
+    monkeypatch.setattr("sightread.jobs.runner.VISION_BACKOFF_BASE_SECONDS", 0.001)
+    blank = httpx.Response(
+        200, json={"choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
+    )
+    respx.post(CHAT_URL).mock(side_effect=[blank, _completion(VISION_MARKDOWN)])
+
+    accepted = await _upload(api_client, documents["mixed_pdf"], pages="1,2")
+    job_id = accepted.json()["job_id"]
+    await _drain_queue(api_client, sessionmaker)
+
+    result = (await api_client.get(f"/v1/jobs/{job_id}/result")).json()
+    assert result["errors"] == []
+    assert result["markdown"]
+    # A finished, empty answer is taken at its word — no retry.
+    assert respx.calls.call_count == 2
+
+
+@respx.mock
+async def test_an_ambiguous_empty_completion_is_blank_only_after_every_attempt(
+    api_client, sessionmaker, documents, monkeypatch
+) -> None:
+    monkeypatch.setattr("sightread.jobs.runner.VISION_BACKOFF_BASE_SECONDS", 0.001)
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json={"choices": []}))
+
+    accepted = await _upload(api_client, documents["mixed_pdf"], pages="1")
+    job_id = accepted.json()["job_id"]
+    await _drain_queue(api_client, sessionmaker)
+
+    status = (await api_client.get(f"/v1/jobs/{job_id}")).json()
+    assert status["status"] == "succeeded"
+    result = (await api_client.get(f"/v1/jobs/{job_id}/result")).json()
+    assert result["errors"] == []
+    assert respx.calls.call_count == 4
 
 
 @respx.mock

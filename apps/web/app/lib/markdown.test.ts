@@ -549,3 +549,78 @@ describe('parseInline', () => {
     ])
   })
 })
+
+describe('display math with the dollars on the formula’s own line', () => {
+  it('reads a one-line $$…$$ as a display block, not a paragraph', () => {
+    const [page] = parseResultMarkdown(
+      ['Before:', '', '$$G_t \\triangleq r_t + \\gamma r_{t+1} \\tag{1.6}$$', '', 'After.'].join('\n'),
+    )
+    expect(page?.blocks).toEqual([
+      { kind: 'p', text: 'Before:' },
+      { kind: 'math', text: 'G_t \\triangleq r_t + \\gamma r_{t+1} \\tag{1.6}' },
+      { kind: 'p', text: 'After.' },
+    ])
+  })
+
+  it('ends the paragraph above it without a blank line between', () => {
+    const [page] = parseResultMarkdown(['where:', '$$x = 1$$'].join('\n'))
+    expect(page?.blocks).toEqual([
+      { kind: 'p', text: 'where:' },
+      { kind: 'math', text: 'x = 1' },
+    ])
+  })
+
+  it('reads dollars that open and close on content lines', () => {
+    const [page] = parseResultMarkdown(['$$\\begin{aligned}', 'a &= b \\\\', 'c &= d', '\\end{aligned}$$', 'Next.'].join('\n'))
+    expect(page?.blocks).toEqual([
+      { kind: 'math', text: '\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}' },
+      { kind: 'p', text: 'Next.' },
+    ])
+  })
+
+  it('leaves a line with trailing prose after the formula as prose', () => {
+    const [page] = parseResultMarkdown(['$$x$$ where x is small', '', 'Next.'].join('\n'))
+    expect(page?.blocks.map((block) => block.kind)).toEqual(['p', 'p'])
+  })
+})
+
+describe('a table of contents', () => {
+  it('keeps one row per line and splits the leader from the page number', () => {
+    const [page] = parseResultMarkdown(
+      [
+        '**1 Introduction** **13**',
+        '1.1 Sequential decision making . . . . . . . 13',
+        '1.2 Canonical models.....17',
+        'Preface . . . . . iv',
+      ].join('\n'),
+    )
+    expect(page?.blocks).toEqual([
+      {
+        kind: 'toc',
+        entries: [
+          { title: '**1 Introduction**', leader: ' ', page: '**13**' },
+          { title: '1.1 Sequential decision making', leader: ' . . . . . . . ', page: '13' },
+          { title: '1.2 Canonical models', leader: '.....', page: '17' },
+          { title: 'Preface', leader: ' . . . . . ', page: 'iv' },
+        ],
+      },
+    ])
+  })
+
+  it('rebuilds every source line from its entry', () => {
+    const lines = ['**2 Value-based RL** **31**', '2.1 Basic concepts . . . . . . 31', 'Part one']
+    const [page] = parseResultMarkdown(lines.join('\n'))
+    const block = page?.blocks[0]
+    expect(block?.kind).toBe('toc')
+    if (block?.kind === 'toc') {
+      expect(block.entries.map((entry) => entry.title + entry.leader + (entry.page ?? ''))).toEqual(lines)
+      expect(block.entries[2]).toEqual({ title: 'Part one', leader: '', page: null })
+    }
+  })
+
+  it('leaves wrapped prose a paragraph, trailing numbers and ellipses included', () => {
+    const [page] = parseResultMarkdown(['The year was', '1984 and so on... and then', 'chapter 7'].join('\n'))
+    expect(page?.blocks).toEqual([{ kind: 'p', text: 'The year was 1984 and so on... and then chapter 7' }])
+  })
+})
+

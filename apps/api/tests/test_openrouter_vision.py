@@ -18,6 +18,7 @@ from sightread.upstream.openrouter import (
     CHAT_URL,
     KIND_OPENAI,
     Connection,
+    EmptyCompletion,
     PaymentRequired,
     RateLimited,
     UpstreamError,
@@ -126,6 +127,75 @@ async def test_provider_error_inside_a_200(key, documents) -> None:
 
     with pytest.raises(PaymentRequired):
         await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("response", "transient"),
+    [
+        (httpx.Response(500), True),
+        (httpx.Response(408), True),
+        (httpx.Response(200, text="<html>bad gateway</html>"), True),
+        (httpx.Response(200, json={"error": {"code": 502}}), True),
+        (httpx.Response(400), False),
+        (httpx.Response(200, json={"error": {"code": 400}}), False),
+    ],
+)
+async def test_only_failures_that_may_not_repeat_are_transient(
+    key, documents, response, transient
+) -> None:
+    respx.post(CHAT_URL).mock(return_value=response)
+
+    with pytest.raises(UpstreamError) as raised:
+        await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+    assert raised.value.transient is transient
+    assert raised.value.fatal is False
+
+
+@respx.mock
+async def test_an_unreachable_upstream_is_transient(key, documents) -> None:
+    respx.post(CHAT_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+
+    with pytest.raises(UpstreamError) as raised:
+        await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+    assert raised.value.transient is True
+
+
+@respx.mock
+async def test_a_finished_null_completion_is_an_empty_page(key, documents) -> None:
+    body = completion("x")
+    body["choices"] = [{"message": {"content": None}, "finish_reason": "stop"}]
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=body))
+
+    page = await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+    assert page.markdown == ""
+    assert page.usage.prompt_tokens == 1200
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "choices", [[], [{"message": {"content": None}}], [{"message": {}}]]
+)
+async def test_an_ambiguous_empty_completion_carries_its_usage(key, documents, choices) -> None:
+    body = completion("x")
+    body["choices"] = choices
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=body))
+
+    with pytest.raises(EmptyCompletion) as raised:
+        await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+    assert raised.value.transient is True
+    assert raised.value.usage.prompt_tokens == 1200
+
+
+@respx.mock
+async def test_a_completion_cut_short_is_never_read_as_blank(key, documents) -> None:
+    body = completion("x")
+    body["choices"] = [{"message": {"content": None}, "finish_reason": "length"}]
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(200, json=body))
+
+    with pytest.raises(UpstreamError) as raised:
+        await transcribe_page(key, "m", PROMPT, "yxyx_norm1000", documents["png"], 1)
+    assert not isinstance(raised.value, EmptyCompletion)
 
 
 def test_user_key_never_reveals_itself_in_a_repr(key) -> None:

@@ -257,3 +257,27 @@ describe('whitespace inside restored code spans', () => {
     expect(nodesToMarkdown([paragraph])).toBe('run `a  b` now')
   })
 })
+
+describe('a table of contents', () => {
+  it('copies one source line per row, leader dots included', () => {
+    const toc = el('div', { class: 'md-toc' }, [
+      el('p', { class: 'md-toc-row' }, [
+        el('span', { class: 'md-toc-title' }, [
+          el('strong', { 'data-src': '**1 Introduction**' }, [text('1 Introduction')]),
+        ]),
+        el('span', { class: 'md-toc-leader', 'data-src': ' ' }),
+        el('span', { class: 'md-toc-page' }, [el('strong', { 'data-src': '**13**' }, [text('13')])]),
+      ]),
+      el('p', { class: 'md-toc-row' }, [
+        el('span', { class: 'md-toc-title' }, [text('1.1 Sequential decision making')]),
+        el('span', { class: 'md-toc-leader dotted', 'data-src': ' . . . . . ' }),
+        el('span', { class: 'md-toc-page' }, [text('13')]),
+      ]),
+    ])
+
+    expect(nodesToMarkdown([toc])).toBe(
+      ['**1 Introduction** **13**', '1.1 Sequential decision making . . . . . 13'].join('\n'),
+    )
+  })
+})
+
